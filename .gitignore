@@ -1,0 +1,21 @@
+# Environment & secrets
+.env
+.secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Data
+backup.db
+*.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/

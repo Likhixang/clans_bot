@@ -1,0 +1,31 @@
+services:
+  bot:
+    build: .
+    container_name: clans_bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: clans_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-clans_redis_pass}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  redis_data:
