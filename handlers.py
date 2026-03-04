@@ -943,21 +943,26 @@ async def cmd_give(msg: types.Message):
         return
 
     args = msg.text.split()
-    if len(args) < 4:
-        await msg.reply("用法: /clan_give [用户ID] [gold/elixir] [数量]")
-        return
 
-    target_uid = args[1]
-    res = args[2].lower()
-    try:
-        amount = int(args[3])
-    except ValueError:
-        await msg.reply("❌ 数量必须是数字")
+    # 回复某人消息: /clan_give gold 数量
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        if len(args) < 3:
+            await msg.reply("用法: 回复某人消息 /clan_give [gold/elixir] [数量]")
+            return
+        target_uid = str(msg.reply_to_message.from_user.id)
+        res = args[1].lower()
+        try:
+            amount = int(args[2])
+        except ValueError:
+            await msg.reply("❌ 数量必须是数字")
+            return
+    else:
+        await msg.reply("❌ 请回复目标玩家的消息来使用此命令\n用法: 回复某人消息 /clan_give [gold/elixir] [数量]")
         return
 
     p = await get_player(target_uid)
     if not p:
-        await msg.reply("❌ 玩家不存在")
+        await msg.reply("❌ 该玩家尚未注册游戏")
         return
 
     if res == "gold":
@@ -969,6 +974,48 @@ async def cmd_give(msg: types.Message):
         return
 
     await msg.reply(f"✅ 已给 {safe_html(p['name'])} {'💰' if res == 'gold' else '💧'} {fmt_num(amount)}")
+
+
+@router.message(Command("clan_take"))
+async def cmd_take(msg: types.Message):
+    if not _check(msg):
+        return
+    uid = _uid(msg)
+    if int(uid) != SUPER_ADMIN_ID:
+        return
+
+    args = msg.text.split()
+
+    # 回复某人消息: /clan_take gold 数量
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        if len(args) < 3:
+            await msg.reply("用法: 回复某人消息 /clan_take [gold/elixir] [数量]")
+            return
+        target_uid = str(msg.reply_to_message.from_user.id)
+        res = args[1].lower()
+        try:
+            amount = int(args[2])
+        except ValueError:
+            await msg.reply("❌ 数量必须是数字")
+            return
+    else:
+        await msg.reply("❌ 请回复目标玩家的消息来使用此命令\n用法: 回复某人消息 /clan_take [gold/elixir] [数量]")
+        return
+
+    p = await get_player(target_uid)
+    if not p:
+        await msg.reply("❌ 该玩家尚未注册游戏")
+        return
+
+    if res == "gold":
+        await add_gold(target_uid, -amount)
+    elif res == "elixir":
+        await add_elixir(target_uid, -amount)
+    else:
+        await msg.reply("❌ 资源类型: gold 或 elixir")
+        return
+
+    await msg.reply(f"✅ 已扣 {safe_html(p['name'])} {'💰' if res == 'gold' else '💧'} {fmt_num(amount)}")
 
 
 @router.message(Command("clan_backup_db"))
