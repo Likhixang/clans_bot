@@ -1,16 +1,21 @@
 import asyncio
 import datetime
+import json
+import logging
 import time
 
-from aiogram import Router, types, F
+from aiogram import Router, types, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from typing import Callable, Any, Dict, Awaitable
 
 from config import (
     BUILDINGS, TROOPS, ALLOWED_CHAT_ID, ALLOWED_THREAD_ID,
     CLAN_CREATE_COST, SUPER_ADMIN_ID, ADMIN_IDS,
     SHIELD_DURATION, TROPHY_ATTACK, NEWBIE_SHIELD, TZ_BJ,
+    LAST_FIX_DESC,
 )
+from core import redis, bot
 from models import (
     ensure_player, get_player, collect_resources,
     add_gold, add_elixir, set_buildings, set_troops,
@@ -25,9 +30,51 @@ from combat import (
     preview_attack, recommend_troops,
 )
 from tasks import perform_backup, perform_restore
-from utils import safe_html, mention, fmt_num, send
+from utils import safe_html, mention, fmt_num, send, pin_in_topic, auto_delete, delete_msg_by_id
 
 router = Router()
+
+logger = logging.getLogger(__name__)
+
+# ───────────────────── 停机维护中间件 ─────────────────────
+
+# 超管命令白名单：维护期间仍允许超管执行这些命令
+_ADMIN_COMMANDS = {"clan_maintain", "clan_compensate", "clan_backup_db", "clan_restore_db"}
+
+
+class MaintenanceMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: Dict[str, Any],
+    ) -> Any:
+        if isinstance(event, types.Message):
+            chat_id = event.chat.id
+            if await redis.exists(f"maintenance:{chat_id}"):
+                # 超管命令放行
+                if event.from_user and event.from_user.id == SUPER_ADMIN_ID:
+                    text = (event.text or "").strip()
+                    if text.startswith("/"):
+                        cmd = text.split()[0].lstrip("/").split("@")[0]
+                        if cmd in _ADMIN_COMMANDS:
+                            return await handler(event, data)
+                tip = await event.reply("🔧 <b>系统维护中</b>，暂停所有功能，请等待维护完成后再操作。")
+                asyncio.create_task(auto_delete([tip], 10))
+                return
+        elif isinstance(event, types.CallbackQuery):
+            chat_id = event.message.chat.id if event.message else None
+            if chat_id and await redis.exists(f"maintenance:{chat_id}"):
+                try:
+                    await event.answer("🔧 系统维护中，请稍后再试", show_alert=True)
+                except Exception:
+                    pass
+                return
+        return await handler(event, data)
+
+
+router.message.middleware(MaintenanceMiddleware())
+router.callback_query.middleware(MaintenanceMiddleware())
 
 # ───────────────────── 村庄可视化 ─────────────────────
 
@@ -1084,6 +1131,139 @@ async def cb_cancel_restore(cb: types.CallbackQuery):
         await cb.message.edit_text("❌ 已取消恢复操作。")
     except Exception:
         pass
+
+
+# ───────────────────── 停机维护 / 停机补偿 ─────────────────────
+
+async def _compensation_cleanup(chat_id: int, msg_id: int, delay: float, redis_key: str):
+    """延迟后清理停机补偿置顶：仅当 key 仍指向本消息时才解钉+删除+清 key"""
+    await asyncio.sleep(delay)
+    current = await redis.get(redis_key)
+    if current and int(current.split(":")[0]) == msg_id:
+        try:
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+        await delete_msg_by_id(chat_id, msg_id)
+        await redis.delete(redis_key)
+
+
+@router.message(Command("clan_maintain"))
+async def cmd_maintain(msg: types.Message):
+    if not _check(msg):
+        return
+    if msg.from_user.id != SUPER_ADMIN_ID:
+        return
+
+    chat_id = msg.chat.id
+
+    # 1. 清理所有进行中的攻击状态
+    destroyed = len(_attack_staging)
+    _attack_staging.clear()
+    _attack_locks.clear()
+
+    # 2. 解除旧的置顶公告（维护 / 补偿）
+    for old_key in [f"compensation_pin:{chat_id}", f"maintenance_pin:{chat_id}"]:
+        old_id = await redis.get(old_key)
+        if old_id:
+            old_msg = int(old_id.split(":")[0])
+            try:
+                await bot.unpin_chat_message(chat_id=chat_id, message_id=old_msg)
+            except Exception:
+                pass
+            await delete_msg_by_id(chat_id, old_msg)
+            await redis.delete(old_key)
+
+    # 3. 设置维护标记
+    await redis.set(f"maintenance:{chat_id}", "1")
+
+    # 4. 发送维护公告并置顶
+    body = (
+        f"🔧 <b>【停机维护公告】</b>\n\n"
+        f"系统即将进行维护，暂时停止服务。\n"
+        f"• 已清理 <b>{destroyed}</b> 个进行中的攻击\n\n"
+        f"维护完成后将置顶「停机补偿」公告并发放补偿资源，感谢耐心等待！"
+    )
+    announce = await send(chat_id, body)
+    try:
+        await pin_in_topic(chat_id, announce.message_id, disable_notification=False)
+    except Exception as e:
+        logger.warning(f"[maintenance] 置顶失败: {e}")
+
+    await redis.set(f"maintenance_pin:{chat_id}", str(announce.message_id))
+
+    # 删除超管的命令消息
+    asyncio.create_task(auto_delete([msg], 0))
+
+
+@router.message(Command("clan_compensate"))
+async def cmd_compensate(msg: types.Message):
+    if not _check(msg):
+        return
+    if msg.from_user.id != SUPER_ADMIN_ID:
+        return
+
+    chat_id = msg.chat.id
+
+    # 解析可选的更新说明
+    extra_desc = (msg.text or "").split(None, 1)[1].strip() if (msg.text or "").strip().count(" ") >= 1 else ""
+
+    # 1. 给所有注册玩家发放 +500 金币 和 +500 圣水
+    uids = await get_all_player_uids()
+    for uid in uids:
+        await add_gold(uid, 500)
+        await add_elixir(uid, 500)
+
+    # 2. 删除超管命令消息
+    asyncio.create_task(auto_delete([msg], 0))
+
+    # 3. 解除维护公告置顶并删除
+    old_maint_id = await redis.get(f"maintenance_pin:{chat_id}")
+    if old_maint_id:
+        try:
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=int(old_maint_id))
+        except Exception:
+            pass
+        await delete_msg_by_id(chat_id, int(old_maint_id))
+        await redis.delete(f"maintenance_pin:{chat_id}")
+
+    # 4. 清除维护标记
+    await redis.delete(f"maintenance:{chat_id}")
+
+    # 5. 解除旧的补偿置顶（如有）
+    old_comp = await redis.get(f"compensation_pin:{chat_id}")
+    if old_comp:
+        old_comp_msg = int(old_comp.split(":")[0])
+        try:
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=old_comp_msg)
+        except Exception:
+            pass
+        await delete_msg_by_id(chat_id, old_comp_msg)
+
+    # 6. 发送补偿公告并置顶
+    body = (
+        f"🔧 <b>【停机补偿】</b>\n\n"
+        f"非常抱歉给大家带来不便！\n"
+        f"系统已向全体 <b>{len(uids)}</b> 名玩家发放 <b>+500</b> 💰金币 和 <b>+500</b> 💧圣水 补偿！\n"
+    )
+
+    desc = extra_desc or LAST_FIX_DESC
+    if desc:
+        body += f"\n📋 <b>本次更新内容：</b>\n{desc}\n"
+
+    body += "\n感谢耐心等待，继续战斗！"
+
+    announce = await send(chat_id, body)
+    try:
+        await pin_in_topic(chat_id, announce.message_id, disable_notification=False)
+    except Exception:
+        pass
+
+    # 存储消息 ID + 时间戳，用于自动清理
+    await redis.set(f"compensation_pin:{chat_id}", f"{announce.message_id}:{int(time.time())}")
+
+    # 30 分钟后自动解除置顶并删除
+    asyncio.create_task(_compensation_cleanup(chat_id, announce.message_id, 1800, f"compensation_pin:{chat_id}"))
 
 
 # ───────────────────── 村庄面板回调 ─────────────────────

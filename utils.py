@@ -2,6 +2,7 @@ import asyncio
 import html
 
 from aiogram import types
+from aiogram.methods import PinChatMessage
 
 from core import bot
 from config import ALLOWED_THREAD_ID
@@ -46,3 +47,18 @@ def fmt_num(n: float) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.1f}K"
     return f"{int(n)}"
+
+
+async def pin_in_topic(chat_id: int, message_id: int, disable_notification: bool = False):
+    """pin_chat_message 的话题感知包装"""
+    kwargs = {"chat_id": chat_id, "message_id": message_id, "disable_notification": disable_notification}
+    if ALLOWED_THREAD_ID:
+        kwargs["message_thread_id"] = ALLOWED_THREAD_ID
+    await bot(PinChatMessage(**kwargs))
+
+
+async def delete_msg_by_id(chat_id: int, message_id: int):
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
