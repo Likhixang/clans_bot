@@ -34,6 +34,9 @@ COMMANDS = [
     BotCommand(command="clan_join", description="加入部落"),
     BotCommand(command="clan_leave", description="离开部落"),
     BotCommand(command="clan_help", description="帮助"),
+    BotCommand(command="clan_give", description="[超管] 发放资源"),
+    BotCommand(command="clan_backup_db", description="[超管] 备份数据库"),
+    BotCommand(command="clan_restore_db", description="[超管] 恢复数据库"),
 ]
 
 

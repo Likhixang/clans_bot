@@ -939,7 +939,7 @@ async def cmd_give(msg: types.Message):
     if not _check(msg):
         return
     uid = _uid(msg)
-    if not _is_admin(uid):
+    if int(uid) != SUPER_ADMIN_ID:
         return
 
     args = msg.text.split()

@@ -67,6 +67,9 @@ docker compose up -d --build
 | `/clan_leave` | 离开部落 |
 | `/clan_info` | 查看部落信息 |
 | `/clan_list` | 部落列表 |
+| `/clan_give <UID> <gold/elixir> <数量>` | [超管] 发放资源 |
+| `/clan_backup_db` | [超管] 备份数据库 |
+| `/clan_restore_db` | [超管] 恢复数据库 |
 
 > 大多数功能可通过 `/clan_me` 面板上的按钮直接操作。
 
