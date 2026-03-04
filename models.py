@@ -230,12 +230,12 @@ async def get_all_player_uids() -> set:
 # ───────────────────── 战斗日志 ─────────────────────
 
 async def add_battle_log(uid: str, record: dict):
-    """添加一条战斗记录，最多保留20条"""
+    """添加一条战斗记录，最多保留100条"""
     await redis.lpush(f"coc:{uid}:battles", json.dumps(record))
-    await redis.ltrim(f"coc:{uid}:battles", 0, 19)
+    await redis.ltrim(f"coc:{uid}:battles", 0, 99)
 
 
 async def get_battle_log(uid: str) -> list[dict]:
-    """获取最近20条战斗记录"""
-    raw = await redis.lrange(f"coc:{uid}:battles", 0, 19)
+    """获取最近100条战斗记录"""
+    raw = await redis.lrange(f"coc:{uid}:battles", 0, 99)
     return [json.loads(r) for r in raw]

@@ -75,7 +75,7 @@ async def perform_backup() -> dict:
                 raw.get("created_at", ""),
             ))
         # 战斗日志
-        logs = await redis.lrange(f"coc:{uid}:battles", 0, 19)
+        logs = await redis.lrange(f"coc:{uid}:battles", 0, 99)
         for idx, log in enumerate(logs):
             battles_data.append((uid, idx, log))
 
@@ -218,7 +218,7 @@ async def perform_restore() -> dict:
         pipe = redis.pipeline()
         for _, log_data in logs:
             pipe.lpush(f"coc:{uid}:battles", log_data)
-        pipe.ltrim(f"coc:{uid}:battles", 0, 19)
+        pipe.ltrim(f"coc:{uid}:battles", 0, 99)
         await pipe.execute()
 
     stats = {
@@ -245,7 +245,7 @@ async def hourly_backup_task():
                     f"🛡 <b>系统自动通报：每小时灾备完成</b>\n\n"
                     f"⏰ 时间：{datetime.datetime.now(TZ_BJ).strftime('%Y-%m-%d %H:%M:%S')}\n"
                     f"👤 玩家：<b>{stats['players']}</b> 条\n"
-                    f"🏳️ 部落：<b>{stats['clans']}</b> 个\n"
+                    f"🏯 部落：<b>{stats['clans']}</b> 个\n"
                     f"⚔️ 战斗日志：<b>{stats['battles']}</b> 条\n"
                     f"✅ 已安全写入本地 <code>backup.db</code> 物理数据库。"
                 ),

@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import time
 
 from aiogram import Router, types, F
@@ -8,7 +9,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import (
     BUILDINGS, TROOPS, ALLOWED_CHAT_ID, ALLOWED_THREAD_ID,
     CLAN_CREATE_COST, SUPER_ADMIN_ID, ADMIN_IDS,
-    SHIELD_DURATION, TROPHY_ATTACK, NEWBIE_SHIELD,
+    SHIELD_DURATION, TROPHY_ATTACK, NEWBIE_SHIELD, TZ_BJ,
 )
 from models import (
     ensure_player, get_player, collect_resources,
@@ -19,7 +20,10 @@ from models import (
     get_all_player_uids, incr_field, get_battle_log,
     set_field,
 )
-from combat import find_target, calculate_attack, execute_attack
+from combat import (
+    find_target, find_targets, calculate_attack, execute_attack,
+    preview_attack, recommend_troops,
+)
 from tasks import perform_backup, perform_restore
 from utils import safe_html, mention, fmt_num, send
 
@@ -126,7 +130,7 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     lines.append(army_text)
 
     if clan_name:
-        lines.append(f"🏳️ {safe_html(clan_name)}")
+        lines.append(f"🏯 {safe_html(clan_name)}")
 
     return "\n".join(lines)
 
@@ -140,7 +144,7 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="⚔️ 攻击", callback_data=f"vm:attack:{uid}"),
-            InlineKeyboardButton(text="🏳️ 部落", callback_data=f"vm:clan:{uid}"),
+            InlineKeyboardButton(text="🏯 部落", callback_data=f"vm:clan:{uid}"),
             InlineKeyboardButton(text="📜 战绩", callback_data=f"vm:log:{uid}"),
         ],
         [
@@ -212,10 +216,10 @@ async def cmd_help(msg: types.Message):
         "/clan_train [兵种ID] [数量] - 训练部队\n"
         "/clan_army - 查看当前部队\n"
         "/clan_attack - 攻击其他玩家\n"
-        "/clan_log - 战绩记录（最近20条）\n\n"
+        "/clan_log - 战绩记录（按日查看）\n\n"
         "🏆 <b>排行</b>\n"
         "/clan_rank - 奖杯排行榜\n\n"
-        "🏳️ <b>部落</b>\n"
+        "🏯 <b>部落</b>\n"
         "/clan_create [名称] - 创建部落\n"
         "/clan_info - 查看部落信息\n"
         "/clan_list - 所有部落列表\n"
@@ -570,6 +574,7 @@ async def cmd_army(msg: types.Message):
 # ───────────────────── /attack ─────────────────────
 
 _attack_locks: dict[str, float] = {}
+_attack_staging: dict[str, dict] = {}  # uid -> {"target_uid", "target_name", "troops": {tid: count}}
 
 @router.message(Command("clan_attack"))
 async def cmd_attack(msg: types.Message):
@@ -626,35 +631,29 @@ async def _do_attack(msg: types.Message, uid: str, name: str, p: dict):
         await msg.reply("❌ 你没有部队！先使用 /clan_train 训练部队")
         return
 
-    result = await find_target(uid, p)
-    if result is None:
+    targets = await find_targets(uid, p, count=5)
+    if not targets:
         await msg.reply("🔍 没有找到可攻击的对手（所有人都有护盾或资源不足）")
         return
 
-    def_uid, defender = result
-    combat = calculate_attack(p, defender)
-    await execute_attack(uid, def_uid, p, defender, combat)
-    _attack_locks[uid] = time.time()
-
-    stars = combat["stars"]
-    star_str = "⭐" * stars if stars else "💀 0星"
-
-    text = (
-        f"⚔️ <b>战斗报告</b>\n\n"
-        f"🗡️ {mention(uid, name)} → 🛡️ {safe_html(defender['name'])}\n\n"
-        f"{combat['details']}\n\n"
-        f"结果: {star_str}\n"
-        f"💰 掠夺金币: +{fmt_num(combat.get('actual_gold', 0))}\n"
-        f"💧 掠夺圣水: +{fmt_num(combat.get('actual_elixir', 0))}\n"
-        f"🏆 奖杯: {'+' if combat['atk_trophy'] >= 0 else ''}{combat['atk_trophy']}\n\n"
-        f"⚠️ 部队已全部消耗，需要重新训练"
-    )
-
-    if stars >= 1:
-        shield_h = SHIELD_DURATION[stars] // 3600
-        text += f"\n🛡️ 对方获得 {shield_h} 小时护盾"
-
-    await msg.reply(text)
+    lines = ["⚔️ <b>选择攻击目标</b>\n"]
+    btns = []
+    for t_uid, t_p in targets:
+        th_lv = t_p["buildings"].get("town_hall", 1)
+        defense = get_defense_power(t_p)
+        total_res = t_p["gold"] + t_p["elixir"]
+        lines.append(
+            f"• {safe_html(t_p['name'])} | 🏰Lv.{th_lv} | "
+            f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | "
+            f"💰{fmt_num(t_p['gold'])} 💧{fmt_num(t_p['elixir'])}"
+        )
+        btns.append([InlineKeyboardButton(
+            text=f"⚔️ {t_p['name']} (🏰{th_lv} 💰💧{fmt_num(total_res)})",
+            callback_data=f"vm:atgt:{t_uid}:{uid}")])
+    btns.append([InlineKeyboardButton(
+        text="🔄 换一批", callback_data=f"vm:attack:{uid}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=btns)
+    await msg.reply("\n".join(lines), reply_markup=kb)
 
 
 # ───────────────────── /clan_log ─────────────────────
@@ -670,11 +669,40 @@ def _fmt_time_ago(ts: float) -> str:
     return f"{diff // 86400}天前"
 
 
-def _format_battle_log(logs: list[dict]) -> str:
+def _format_battle_log_page(logs: list[dict], page: int = 0) -> tuple[str, list[str]]:
+    """按日期分组战绩，page=0 为最新一天，返回 (text, date_keys)"""
     if not logs:
-        return "📜 <b>战绩记录</b>\n\n暂无战斗记录"
-    lines = ["📜 <b>战绩记录（最近20条）</b>\n"]
+        return "📜 <b>战绩记录</b>\n\n暂无战斗记录", []
+
+    # 按北京时间日期分组
+    grouped: dict[str, list[dict]] = {}
     for r in logs:
+        ts = r.get("time", 0)
+        dt = datetime.datetime.fromtimestamp(ts, tz=TZ_BJ)
+        key = dt.strftime("%Y-%m-%d")
+        grouped.setdefault(key, []).append(r)
+
+    date_keys = sorted(grouped.keys(), reverse=True)
+    if not date_keys:
+        return "📜 <b>战绩记录</b>\n\n暂无战斗记录", []
+
+    page = max(0, min(page, len(date_keys) - 1))
+    key = date_keys[page]
+
+    today = datetime.datetime.now(TZ_BJ).strftime("%Y-%m-%d")
+    yesterday = (datetime.datetime.now(TZ_BJ) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    if key == today:
+        label = "今天"
+    elif key == yesterday:
+        label = "昨天"
+    else:
+        label = key
+
+    lines = [f"📜 <b>战绩记录 · {label}</b>  ({page + 1}/{len(date_keys)})\n"]
+    for r in grouped[key]:
+        ts = r.get("time", 0)
+        dt = datetime.datetime.fromtimestamp(ts, tz=TZ_BJ)
+        hm = dt.strftime("%H:%M")
         if r["type"] == "attack":
             icon = "⚔️ 进攻 →"
         else:
@@ -686,13 +714,21 @@ def _format_battle_log(logs: list[dict]) -> str:
         elix_sign = "+" if elixir >= 0 else ""
         trophy = r.get("trophies", 0)
         trophy_sign = "+" if trophy >= 0 else ""
-        ago = _fmt_time_ago(r.get("time", 0))
+        troops_text = ""
+        used = r.get("troops_used")
+        if used:
+            parts = []
+            for tid, cnt in used.items():
+                if cnt > 0 and tid in TROOPS:
+                    parts.append(f"{TROOPS[tid]['emoji']}×{cnt}")
+            if parts:
+                troops_text = " | " + " ".join(parts)
         lines.append(
-            f"{icon} {safe_html(r.get('opponent', '?'))} | {stars} | "
+            f"<code>{hm}</code> {icon} {safe_html(r.get('opponent', '?'))} | {stars} | "
             f"💰{gold_sign}{fmt_num(gold)} 💧{elix_sign}{fmt_num(elixir)} | "
-            f"🏆{trophy_sign}{trophy} | {ago}"
+            f"🏆{trophy_sign}{trophy}{troops_text}"
         )
-    return "\n".join(lines)
+    return "\n".join(lines), date_keys
 
 
 @router.message(Command("clan_log"))
@@ -702,8 +738,13 @@ async def cmd_log(msg: types.Message):
     uid, name = _uid(msg), _name(msg)
     await ensure_player(uid, name)
     logs = await get_battle_log(uid)
-    text = _format_battle_log(logs)
-    await msg.reply(text)
+    text, date_keys = _format_battle_log_page(logs, 0)
+    btns = []
+    if len(date_keys) > 1:
+        btns.append([InlineKeyboardButton(
+            text="◀️ 前一天", callback_data=f"vm:log:1:{uid}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=btns) if btns else None
+    await msg.reply(text, reply_markup=kb)
 
 
 # ───────────────────── /rank ─────────────────────
@@ -772,7 +813,7 @@ async def cmd_clan_create(msg: types.Message):
     clan_id = await create_clan(uid, clan_name)
 
     await msg.reply(
-        f"🏳️ 部落 <b>{safe_html(clan_name)}</b> 创建成功！\n"
+        f"🏯 部落 <b>{safe_html(clan_name)}</b> 创建成功！\n"
         f"部落ID: <code>{clan_id}</code>\n"
         f"花费: 💰 {fmt_num(CLAN_CREATE_COST)}\n\n"
         f"其他玩家可通过 /clan_join {clan_id} 加入"
@@ -856,7 +897,7 @@ async def cmd_clan_info(msg: types.Message):
             )
 
     text = (
-        f"🏳️ <b>{safe_html(clan['name'])}</b>\n"
+        f"🏯 <b>{safe_html(clan['name'])}</b>\n"
         f"ID: <code>{p['clan_id']}</code>\n"
         f"🏆 总奖杯: {total_trophies}\n"
         f"👥 成员: {len(members)}人\n\n"
@@ -871,10 +912,10 @@ async def cmd_clan_list(msg: types.Message):
         return
     clans = await list_clans()
     if not clans:
-        await msg.reply("🏳️ 还没有部落，使用 /clan_create 创建一个！")
+        await msg.reply("🏯 还没有部落，使用 /clan_create 创建一个！")
         return
 
-    lines = ["🏳️ <b>部落列表</b>\n"]
+    lines = ["🏯 <b>部落列表</b>\n"]
     for c in clans:
         count = len(c.get("members", []))
         lines.append(
@@ -940,7 +981,7 @@ async def cmd_backup_db(msg: types.Message):
     await msg.reply(
         f"✅ <b>手动备份完成！</b>\n"
         f"👤 玩家：{stats['players']} 条\n"
-        f"🏳️ 部落：{stats['clans']} 个\n"
+        f"🏯 部落：{stats['clans']} 个\n"
         f"⚔️ 战斗日志：{stats['battles']} 条"
     )
 
@@ -983,7 +1024,7 @@ async def cb_confirm_restore(cb: types.CallbackQuery):
         await cb.message.edit_text(
             f"✅ <b>系统恢复成功！</b>\n"
             f"👤 玩家：{stats['players']} 条\n"
-            f"🏳️ 部落：{stats['clans']} 个\n"
+            f"🏯 部落：{stats['clans']} 个\n"
             f"⚔️ 战斗日志：{stats['battles']} 条"
         )
     except Exception:
@@ -1055,26 +1096,74 @@ async def cb_village_panel(cb: types.CallbackQuery):
         for bid, info in BUILDINGS.items():
             cur_lv = bld.get(bid, 0)
             req = info["th_required"]
+            max_lv = info["max_level"] if bid == "town_hall" else min(th_lv + 1, info["max_level"])
+            res_icon = "💰" if info["resource"] == "gold" else "💧"
+
             if th_lv < req:
                 lines.append(f"🔒 {info['name']} — 大本营 Lv.{req} 解锁")
-            else:
-                if cur_lv == 0:
-                    label = f"{info['emoji']} {info['name']} [建造]"
-                else:
-                    max_lv = info["max_level"] if bid == "town_hall" else min(th_lv + 1, info["max_level"])
-                    if cur_lv >= max_lv:
-                        label = f"{info['emoji']} {info['name']} Lv.{cur_lv} ✅"
-                    else:
-                        label = f"{info['emoji']} {info['name']} Lv.{cur_lv}"
+            elif cur_lv == 0:
+                # 未建造：显示 Lv.1 属性和建造费用
+                cost = info["costs"][0]
+                stat = ""
+                if "production" in info:
+                    stat = f" | 产量 {fmt_num(info['production'][0])}/h"
+                elif "capacity" in info:
+                    stat = f" | 容量 {fmt_num(info['capacity'][0])}"
+                elif "defense" in info:
+                    stat = f" | 防御 {fmt_num(info['defense'][0])}"
+                lines.append(
+                    f"{info['emoji']} {info['name']} [未建造]{stat} | 建造: {res_icon}{fmt_num(cost)}"
+                )
                 row.append(InlineKeyboardButton(
-                    text=label, callback_data=f"vm:bld:{bid}:{uid}"))
+                    text=f"{info['emoji']} {info['name']} [建造]",
+                    callback_data=f"vm:bld:{bid}:{uid}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            elif cur_lv >= max_lv:
+                # 满级
+                stat = ""
+                if "production" in info:
+                    stat = f" | 产量 {fmt_num(info['production'][cur_lv - 1])}/h"
+                elif "capacity" in info:
+                    stat = f" | 容量 {fmt_num(info['capacity'][cur_lv - 1])}"
+                elif "defense" in info:
+                    stat = f" | 防御 {fmt_num(info['defense'][cur_lv - 1])}"
+                elif bid == "barracks":
+                    stat = f" | 人口上限 {fmt_num(info['capacity'][cur_lv - 1])}"
+                lines.append(
+                    f"{info['emoji']} {info['name']} Lv.{cur_lv} ✅{stat}"
+                )
+                row.append(InlineKeyboardButton(
+                    text=f"{info['emoji']} {info['name']} Lv.{cur_lv} ✅",
+                    callback_data=f"vm:bld:{bid}:{uid}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            else:
+                # 可升级
+                cost = info["costs"][cur_lv]
+                stat = ""
+                if "production" in info:
+                    stat = f" | {fmt_num(info['production'][cur_lv - 1])}/h"
+                elif "capacity" in info:
+                    stat = f" | 容量 {fmt_num(info['capacity'][cur_lv - 1])}"
+                elif "defense" in info:
+                    stat = f" | 防御 {fmt_num(info['defense'][cur_lv - 1])}"
+                elif bid == "barracks":
+                    stat = f" | 人口上限 {fmt_num(info['capacity'][cur_lv - 1])}"
+                lines.append(
+                    f"{info['emoji']} {info['name']} Lv.{cur_lv}{stat} | 升级: {res_icon}{fmt_num(cost)} → Lv.{cur_lv + 1}"
+                )
+                row.append(InlineKeyboardButton(
+                    text=f"{info['emoji']} {info['name']} Lv.{cur_lv}",
+                    callback_data=f"vm:bld:{bid}:{uid}"))
                 if len(row) == 2:
                     buttons.append(row)
                     row = []
         if row:
             buttons.append(row)
         buttons.append([
-            InlineKeyboardButton(text="📊 产量", callback_data=f"vm:rates:{uid}"),
             InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}"),
         ])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1425,11 +1514,27 @@ async def cb_village_panel(cb: types.CallbackQuery):
         await cb.answer(f"✅ 训练了 {count}个{t['name']}")
 
     elif action == "log":
+        # 支持 vm:log:{uid} 和 vm:log:{page}:{uid} 两种格式
+        if len(parts) == 3:
+            page = 0
+        else:
+            page = int(parts[2])
+            owner_uid = parts[3]
         logs = await get_battle_log(uid)
-        text = _format_battle_log(logs)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")]
-        ])
+        text, date_keys = _format_battle_log_page(logs, page)
+        nav = []
+        if page < len(date_keys) - 1:
+            nav.append(InlineKeyboardButton(
+                text="◀️ 前一天", callback_data=f"vm:log:{page + 1}:{uid}"))
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="后一天 ▶️", callback_data=f"vm:log:{page - 1}:{uid}"))
+        btns = []
+        if nav:
+            btns.append(nav)
+        btns.append([InlineKeyboardButton(
+            text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")])
+        kb = InlineKeyboardMarkup(inline_keyboard=btns)
         try:
             await cb.message.edit_text(text, reply_markup=kb)
         except Exception:
@@ -1474,11 +1579,179 @@ async def cb_village_panel(cb: types.CallbackQuery):
         p["shield_until"] = 0
         await _do_attack_inline(cb, uid, name, p)
 
+    elif action == "atgt":
+        # 选择攻击目标，进入出兵面板
+        target_uid = parts[2]
+        target_p = await get_player(target_uid)
+        if not target_p:
+            await cb.answer("❌ 目标玩家不存在", show_alert=True)
+            return
+        _attack_staging[uid] = {
+            "target_uid": target_uid,
+            "target_name": target_p["name"],
+            "target_data": target_p,
+            "troops": {},
+        }
+        text, kb = _render_troop_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "asel":
+        # 调整兵种数量 vm:asel:{tid}:{delta}:{uid}
+        tid = parts[2]
+        delta = int(parts[3])
+        staging = _attack_staging.get(uid)
+        if not staging:
+            await cb.answer("❌ 请重新选择目标", show_alert=True)
+            return
+        have = p["troops"].get(tid, 0)
+        cur = staging["troops"].get(tid, 0)
+        new_val = max(0, min(have, cur + delta))
+        if new_val == 0:
+            staging["troops"].pop(tid, None)
+        else:
+            staging["troops"][tid] = new_val
+        text, kb = _render_troop_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "anop":
+        await cb.answer()
+
+    elif action == "arec":
+        # 智能配兵推荐
+        staging = _attack_staging.get(uid)
+        if not staging:
+            await cb.answer("❌ 请重新选择目标", show_alert=True)
+            return
+        target_data = staging.get("target_data")
+        if not target_data:
+            target_data = await get_player(staging["target_uid"])
+        if not target_data:
+            await cb.answer("❌ 目标不存在", show_alert=True)
+            return
+        rec = recommend_troops(p, target_data)
+        if not rec:
+            await cb.answer("❌ 没有可用部队", show_alert=True)
+            return
+        staging["troops"] = rec
+        text, kb = _render_troop_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("🧠 已智能配兵")
+
+    elif action == "aall":
+        # 全部出战
+        staging = _attack_staging.get(uid)
+        if not staging:
+            await cb.answer("❌ 请重新选择目标", show_alert=True)
+            return
+        staging["troops"] = {tid: cnt for tid, cnt in p["troops"].items() if cnt > 0}
+        text, kb = _render_troop_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("💪 已选择全部部队")
+
+    elif action == "aclr":
+        # 清空选择
+        staging = _attack_staging.get(uid)
+        if not staging:
+            await cb.answer("❌ 请重新选择目标", show_alert=True)
+            return
+        staging["troops"] = {}
+        text, kb = _render_troop_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("🗑️ 已清空")
+
+    elif action == "ago":
+        # 确认进攻
+        staging = _attack_staging.pop(uid, None)
+        if not staging or not any(v > 0 for v in staging["troops"].values()):
+            await cb.answer("❌ 请选择部队", show_alert=True)
+            return
+        # 冷却检查
+        last = _attack_locks.get(uid, 0)
+        if time.time() - last < 30:
+            remain = int(30 - (time.time() - last))
+            await cb.answer(f"⏳ 攻击冷却中，{remain}秒后", show_alert=True)
+            return
+        target_uid = staging["target_uid"]
+        defender = await get_player(target_uid)
+        if not defender:
+            await cb.answer("❌ 目标不存在", show_alert=True)
+            return
+        if defender["shield_until"] > time.time():
+            await cb.answer("❌ 对方已有护盾保护", show_alert=True)
+            return
+        # 验证选中部队是否仍然足够
+        for tid, cnt in staging["troops"].items():
+            if p["troops"].get(tid, 0) < cnt:
+                await cb.answer("❌ 部队数量已变化，请重新选择", show_alert=True)
+                return
+        selected = staging["troops"]
+        combat = calculate_attack(p, defender, selected_troops=selected)
+        await execute_attack(uid, target_uid, p, defender, combat,
+                             selected_troops=selected)
+        _attack_locks[uid] = time.time()
+
+        stars = combat["stars"]
+        star_str = "⭐" * stars if stars else "💀 0星"
+
+        # 部队明细
+        troop_lines = []
+        for tid, cnt in selected.items():
+            if cnt > 0 and tid in TROOPS:
+                t = TROOPS[tid]
+                troop_lines.append(f"  {t['emoji']} {t['name']} ×{cnt}")
+        troop_text = "\n".join(troop_lines)
+
+        text = (
+            f"⚔️ <b>战斗报告</b>\n\n"
+            f"🗡️ {mention(uid, name)} → 🛡️ {safe_html(defender['name'])}\n\n"
+            f"📋 出战部队:\n{troop_text}\n\n"
+            f"{combat['details']}\n\n"
+            f"结果: {star_str}\n"
+            f"💰 掠夺金币: +{fmt_num(combat.get('actual_gold', 0))}\n"
+            f"💧 掠夺圣水: +{fmt_num(combat.get('actual_elixir', 0))}\n"
+            f"🏆 奖杯: {'+' if combat['atk_trophy'] >= 0 else ''}{combat['atk_trophy']}\n\n"
+            f"⚠️ 出战部队已消耗"
+        )
+        if stars >= 1:
+            shield_h = SHIELD_DURATION[stars] // 3600
+            text += f"\n🛡️ 对方获得 {shield_h} 小时护盾"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")]
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "aback":
+        # 返回目标列表
+        _attack_staging.pop(uid, None)
+        await _do_attack_inline(cb, uid, name, p)
+
     elif action == "clan":
         if not p["clan_id"]:
             # 未加入部落 → 显示部落选项面板
             clans = await list_clans()
-            lines = ["🏳️ <b>部落</b>\n", "你还没有加入任何部落\n"]
+            lines = ["🏯 <b>部落</b>\n", "你还没有加入任何部落\n"]
             btns = []
             if clans:
                 lines.append("📋 <b>可加入的部落：</b>")
@@ -1524,7 +1797,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
                 )
 
         text = (
-            f"🏳️ <b>{safe_html(clan['name'])}</b>\n"
+            f"🏯 <b>{safe_html(clan['name'])}</b>\n"
             f"ID: <code>{p['clan_id']}</code>\n"
             f"🏆 总奖杯: {total_trophies}  👥 {len(members)}人\n\n"
             + "\n".join(member_lines)
@@ -1654,7 +1927,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
             "  ⚔️ 攻击 — 搜索对手并发起进攻\n"
             "  📜 战绩 — 查看最近战斗记录\n"
             "  🏆 排行 — 奖杯排行榜\n\n"
-            "🏳️ <b>部落</b>\n"
+            "🏯 <b>部落</b>\n"
             "  加入或创建部落，与盟友并肩作战\n\n"
             "💡 <b>提示</b>\n"
             "  • 升级大本营解锁更多建筑\n"
@@ -1673,39 +1946,144 @@ async def cb_village_panel(cb: types.CallbackQuery):
 
 
 async def _do_attack_inline(cb: types.CallbackQuery, uid: str, name: str, p: dict):
-    """通过村庄面板按钮发起攻击"""
-    result = await find_target(uid, p)
-    if result is None:
+    """通过村庄面板按钮展示目标选择面板"""
+    targets = await find_targets(uid, p, count=5)
+    if not targets:
         await cb.answer("🔍 没有可攻击的对手", show_alert=True)
         return
 
-    def_uid, defender = result
-    combat = calculate_attack(p, defender)
-    await execute_attack(uid, def_uid, p, defender, combat)
-    _attack_locks[uid] = time.time()
-
-    stars = combat["stars"]
-    star_str = "⭐" * stars if stars else "💀 0星"
-
-    text = (
-        f"⚔️ <b>战斗报告</b>\n\n"
-        f"🗡️ {mention(uid, name)} → 🛡️ {safe_html(defender['name'])}\n\n"
-        f"{combat['details']}\n\n"
-        f"结果: {star_str}\n"
-        f"💰 掠夺金币: +{fmt_num(combat.get('actual_gold', 0))}\n"
-        f"💧 掠夺圣水: +{fmt_num(combat.get('actual_elixir', 0))}\n"
-        f"🏆 奖杯: {'+' if combat['atk_trophy'] >= 0 else ''}{combat['atk_trophy']}\n\n"
-        f"⚠️ 部队已全部消耗，需要重新训练"
-    )
-    if stars >= 1:
-        shield_h = SHIELD_DURATION[stars] // 3600
-        text += f"\n🛡️ 对方获得 {shield_h} 小时护盾"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")]
+    lines = ["⚔️ <b>选择攻击目标</b>\n"]
+    btns = []
+    for t_uid, t_p in targets:
+        th_lv = t_p["buildings"].get("town_hall", 1)
+        defense = get_defense_power(t_p)
+        total_res = t_p["gold"] + t_p["elixir"]
+        lines.append(
+            f"• {safe_html(t_p['name'])} | 🏰Lv.{th_lv} | "
+            f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | "
+            f"💰{fmt_num(t_p['gold'])} 💧{fmt_num(t_p['elixir'])}"
+        )
+        btns.append([InlineKeyboardButton(
+            text=f"⚔️ {t_p['name']} (🏰{th_lv} 💰💧{fmt_num(total_res)})",
+            callback_data=f"vm:atgt:{t_uid}:{uid}")])
+    btns.append([
+        InlineKeyboardButton(text="🔄 换一批", callback_data=f"vm:attack:{uid}"),
+        InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}"),
     ])
+    kb = InlineKeyboardMarkup(inline_keyboard=btns)
     try:
-        await cb.message.edit_text(text, reply_markup=kb)
+        await cb.message.edit_text("\n".join(lines), reply_markup=kb)
     except Exception:
         pass
     await cb.answer()
+
+
+def _render_troop_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """渲染出兵选择面板（含战斗预览）"""
+    staging = _attack_staging.get(uid)
+    if not staging:
+        return "❌ 无攻击状态", InlineKeyboardMarkup(inline_keyboard=[])
+
+    selected = staging["troops"]
+    all_troops = p["troops"]
+    target_data = staging.get("target_data")
+
+    lines = [
+        f"🗡️ <b>出兵面板</b> → {safe_html(staging['target_name'])}",
+        "",
+    ]
+
+    # 目标防御概要
+    if target_data:
+        bld = target_data["buildings"]
+        def_parts = []
+        for bid in ("cannon", "archer_tower", "wall"):
+            lv = bld.get(bid, 0)
+            if lv > 0:
+                def_parts.append(f"{BUILDINGS[bid]['emoji']}{BUILDINGS[bid]['name']}Lv.{lv}")
+        if def_parts:
+            lines.append(f"🎯 防御: {' | '.join(def_parts)}")
+        lines.append(
+            f"💰{fmt_num(target_data['gold'])} 💧{fmt_num(target_data['elixir'])}"
+        )
+        lines.append("")
+
+    total_power = 0
+    for tid, cnt in selected.items():
+        if cnt > 0 and tid in TROOPS:
+            t = TROOPS[tid]
+            total_power += t["power"] * cnt
+
+    for tid, have in all_troops.items():
+        if have <= 0:
+            continue
+        t = TROOPS[tid]
+        sel = selected.get(tid, 0)
+        power = t["power"] * sel if sel > 0 else 0
+        lines.append(f"{t['emoji']} {t['name']}  {sel}/{have}  ⚔️{fmt_num(power)}")
+
+    # 战斗预览
+    if total_power > 0 and target_data:
+        pv = preview_attack(p, target_data, selected)
+        if pv["stars_min"] == pv["stars_max"]:
+            star_text = f"{'⭐' * pv['stars_min'] if pv['stars_min'] else '0星'}"
+        else:
+            lo = '⭐' * pv['stars_min'] if pv['stars_min'] else '0星'
+            hi = '⭐' * pv['stars_max']
+            star_text = f"{lo} ~ {hi}"
+        lines.append(
+            f"\n📊 <b>战斗预估</b>\n"
+            f"⚔️ {fmt_num(pv['power'])} vs 🛡️ {fmt_num(pv['defense'])}\n"
+            f"预计: {star_text}\n"
+            f"预计掠夺: 💰{fmt_num(pv['gold_est'])} 💧{fmt_num(pv['elixir_est'])}"
+        )
+    elif total_power > 0:
+        lines.append(f"\n总攻击力: ⚔️ {fmt_num(total_power)}")
+    else:
+        lines.append("\n⚠️ 请选择部队出战")
+
+    btns = []
+    for tid, have in all_troops.items():
+        if have <= 0:
+            continue
+        t = TROOPS[tid]
+        sel = selected.get(tid, 0)
+        row = []
+        row.append(InlineKeyboardButton(
+            text=f"{t['emoji']}{t['name']} {sel}/{have}",
+            callback_data=f"vm:anop:{uid}"))
+        if sel > 0:
+            row.append(InlineKeyboardButton(
+                text="➖", callback_data=f"vm:asel:{tid}:-1:{uid}"))
+            row.append(InlineKeyboardButton(
+                text="清零", callback_data=f"vm:asel:{tid}:-{sel}:{uid}"))
+        if sel < have:
+            row.append(InlineKeyboardButton(
+                text="➕", callback_data=f"vm:asel:{tid}:1:{uid}"))
+            row.append(InlineKeyboardButton(
+                text="全部", callback_data=f"vm:asel:{tid}:{have - sel}:{uid}"))
+        btns.append(row)
+
+    # 快捷操作行: 智能配兵 / 全部出战 / 清空
+    quick_row = []
+    quick_row.append(InlineKeyboardButton(
+        text="🧠 智能配兵", callback_data=f"vm:arec:{uid}"))
+    has_any = any(v > 0 for v in selected.values())
+    if not has_any:
+        quick_row.append(InlineKeyboardButton(
+            text="💪 全部出战", callback_data=f"vm:aall:{uid}"))
+    else:
+        quick_row.append(InlineKeyboardButton(
+            text="🗑️ 清空", callback_data=f"vm:aclr:{uid}"))
+    btns.append(quick_row)
+
+    action_row = []
+    if total_power > 0:
+        action_row.append(InlineKeyboardButton(
+            text="⚔️ 确认进攻！", callback_data=f"vm:ago:{uid}"))
+    action_row.append(InlineKeyboardButton(
+        text="◀️ 选目标", callback_data=f"vm:aback:{uid}"))
+    btns.append(action_row)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=btns)
+    return "\n".join(lines), kb

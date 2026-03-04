@@ -13,32 +13,61 @@ from models import (
 
 
 async def find_target(attacker_uid: str, attacker: dict) -> tuple[str, dict] | None:
-    """随机找一个可攻击的对手"""
+    """随机找一个可攻击的对手（跳过同部落成员）"""
     all_uids = await get_all_player_uids()
     candidates = list(all_uids - {attacker_uid})
     random.shuffle(candidates)
 
+    attacker_clan = attacker.get("clan_id", "")
     now = time.time()
-    for uid in candidates[:20]:  # 最多扫描 20 人
+    for uid in candidates[:20]:
         p = await get_player(uid)
         if not p:
             continue
-        # 有护盾跳过
         if p["shield_until"] > now:
             continue
-        # 至少有一些资源可抢
         if p["gold"] + p["elixir"] < 100:
+            continue
+        # 同部落保护
+        if attacker_clan and p.get("clan_id") == attacker_clan:
             continue
         return uid, p
     return None
 
 
-def calculate_attack(attacker: dict, defender: dict) -> dict:
-    """计算战斗结果"""
-    troops = attacker["troops"]
+async def find_targets(attacker_uid: str, attacker: dict, count: int = 5) -> list[tuple[str, dict]]:
+    """返回最多 count 个候选目标（跳过同部落成员）"""
+    all_uids = await get_all_player_uids()
+    candidates = list(all_uids - {attacker_uid})
+    random.shuffle(candidates)
+
+    attacker_clan = attacker.get("clan_id", "")
+    now = time.time()
+    results = []
+    for uid in candidates[:50]:
+        p = await get_player(uid)
+        if not p:
+            continue
+        if p["shield_until"] > now:
+            continue
+        if p["gold"] + p["elixir"] < 100:
+            continue
+        if attacker_clan and p.get("clan_id") == attacker_clan:
+            continue
+        results.append((uid, p))
+        if len(results) >= count:
+            break
+    return results
+
+
+def calculate_attack(attacker: dict, defender: dict,
+                     selected_troops: dict | None = None) -> dict:
+    """计算战斗结果。selected_troops 指定出战部队，None 则使用全部"""
+    troops = selected_troops if selected_troops is not None else attacker["troops"]
     if not any(v > 0 for v in troops.values()):
         return {"stars": 0, "attack_power": 0, "defense_power": 0,
-                "gold_loot": 0, "elixir_loot": 0, "details": "没有部队！"}
+                "gold_loot": 0, "elixir_loot": 0, "details": "没有部队！",
+                "troops_used": {}}
 
     # ── 攻击力 ──
     base_attack = 0
@@ -125,6 +154,9 @@ def calculate_attack(attacker: dict, defender: dict) -> dict:
     details_parts.append(f"⚔️ 攻击力 {int(final_atk)} vs 🛡️ 防御力 {int(final_def)}")
     details_parts.append(f"比值 {ratio:.2f} → {'⭐' * stars if stars else '💀 0星'}")
 
+    # 记录使用的部队
+    troops_used = {tid: cnt for tid, cnt in troops.items() if cnt > 0}
+
     return {
         "stars": stars,
         "attack_power": int(final_atk),
@@ -133,12 +165,14 @@ def calculate_attack(attacker: dict, defender: dict) -> dict:
         "elixir_loot": elixir_loot,
         "loot_multiplier": loot_multiplier,
         "details": "\n".join(details_parts),
+        "troops_used": troops_used,
     }
 
 
 async def execute_attack(attacker_uid: str, defender_uid: str,
-                         attacker: dict, defender: dict, result: dict):
-    """执行战斗结算：转移资源、清空部队、加护盾、更新战绩"""
+                         attacker: dict, defender: dict, result: dict,
+                         selected_troops: dict | None = None):
+    """执行战斗结算。selected_troops 指定消耗的部队，None 则清空全部"""
     stars = result["stars"]
     gold_loot = result["gold_loot"]
     elixir_loot = result["elixir_loot"]
@@ -162,8 +196,17 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
     if elixir_loot > 0:
         await add_elixir(defender_uid, -elixir_loot)
 
-    # 攻击方部队清空
-    await set_troops(attacker_uid, {})
+    # 攻击方部队处理
+    if selected_troops is not None:
+        # 只扣除选中的部队，保留未选中的
+        remaining = dict(attacker["troops"])
+        for tid, cnt in selected_troops.items():
+            remaining[tid] = remaining.get(tid, 0) - cnt
+            if remaining[tid] <= 0:
+                remaining.pop(tid, None)
+        await set_troops(attacker_uid, remaining)
+    else:
+        await set_troops(attacker_uid, {})
 
     # 护盾
     if stars > 0:
@@ -187,6 +230,8 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
     result["atk_trophy"] = atk_trophy
     result["def_trophy"] = def_trophy
 
+    troops_used = result.get("troops_used", {})
+
     # 战斗日志
     now = time.time()
     await add_battle_log(attacker_uid, {
@@ -197,6 +242,7 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         "elixir": actual_elix,
         "trophies": atk_trophy,
         "time": now,
+        "troops_used": troops_used,
     })
     await add_battle_log(defender_uid, {
         "type": "defense",
@@ -207,3 +253,156 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         "trophies": def_trophy,
         "time": now,
     })
+
+
+def preview_attack(attacker: dict, defender: dict,
+                   selected_troops: dict) -> dict:
+    """预览战斗结果（不含随机因子），返回预估星级和掠夺"""
+    troops = selected_troops
+    if not any(v > 0 for v in troops.values()):
+        return {"stars_min": 0, "stars_max": 0, "power": 0, "defense": 0,
+                "gold_est": 0, "elixir_est": 0}
+
+    base_attack = 0
+    has_air = False
+    has_wall_breaker = False
+    loot_multiplier = 1.0
+
+    for tid, cnt in troops.items():
+        if cnt <= 0:
+            continue
+        t = TROOPS[tid]
+        base_attack += t["power"] * cnt
+        if t.get("bypass_wall"):
+            has_air = True
+        if t.get("wall_damage"):
+            has_wall_breaker = True
+        if t.get("loot_bonus"):
+            goblin_ratio = (cnt * t["housing"]) / max(sum(
+                TROOPS[k]["housing"] * v for k, v in troops.items() if v > 0
+            ), 1)
+            loot_multiplier += (t["loot_bonus"] - 1) * goblin_ratio
+
+    bld = defender["buildings"]
+    cannon_def = 0
+    tower_def = 0
+    wall_def = 0
+    for bid in ("cannon", "archer_tower"):
+        lv = bld.get(bid, 0)
+        if lv > 0:
+            val = BUILDINGS[bid]["defense"][lv - 1]
+            if bid == "cannon":
+                cannon_def += val
+            else:
+                tower_def += val
+    wall_lv = bld.get("wall", 0)
+    if wall_lv > 0:
+        wall_def = BUILDINGS["wall"]["defense"][wall_lv - 1]
+
+    effective_wall = 0 if has_air else wall_def
+    if has_wall_breaker:
+        effective_wall *= 0.3
+    total_def = cannon_def + tower_def + effective_wall
+
+    if total_def == 0:
+        ratio_min, ratio_max = 10.0, 10.0
+    else:
+        # 最差: atk*0.85 / def*1.15, 最好: atk*1.15 / def*0.85
+        ratio_min = (base_attack * 0.85) / (total_def * 1.15)
+        ratio_max = (base_attack * 1.15) / (total_def * 0.85)
+
+    def _stars(r):
+        if r >= 2.0:
+            return 3
+        if r >= 1.2:
+            return 2
+        if r >= 0.6:
+            return 1
+        return 0
+
+    stars_min = _stars(ratio_min)
+    stars_max = _stars(ratio_max)
+
+    avg_stars = (stars_min + stars_max) / 2
+    est_pct = LOOT_PERCENT.get(round(avg_stars), LOOT_PERCENT.get(stars_min, 0)) * loot_multiplier
+
+    return {
+        "stars_min": stars_min,
+        "stars_max": stars_max,
+        "power": base_attack,
+        "defense": int(total_def),
+        "gold_est": round(defender["gold"] * est_pct),
+        "elixir_est": round(defender["elixir"] * est_pct),
+    }
+
+
+def recommend_troops(attacker: dict, defender: dict) -> dict:
+    """根据对手防御推荐最优配兵方案"""
+    available = {tid: cnt for tid, cnt in attacker["troops"].items() if cnt > 0}
+    if not available:
+        return {}
+
+    bld = defender["buildings"]
+    wall_lv = bld.get("wall", 0)
+    cannon_lv = bld.get("cannon", 0)
+    tower_lv = bld.get("archer_tower", 0)
+    has_wall = wall_lv > 0
+    has_tower = tower_lv > 0
+
+    # 优先级策略:
+    # 1) 有高城墙 → 空军优先(dragon > balloon) 或 炸弹人
+    # 2) 有箭塔(对空) → 地面重型(giant > wizard) + 炸弹人破墙
+    # 3) 资源多 → 掺入哥布林
+    # 4) 通用填充: wizard > archer > barbarian
+
+    result = {}
+    capacity = sum(
+        TROOPS[tid]["housing"] * cnt for tid, cnt in available.items()
+    )  # 全部可用住房
+    used_housing = 0
+
+    def _add(tid, count):
+        nonlocal used_housing
+        if tid not in available or available[tid] <= 0:
+            return 0
+        actual = min(count, available[tid])
+        if actual <= 0:
+            return 0
+        result[tid] = result.get(tid, 0) + actual
+        available[tid] -= actual
+        used_housing += actual * TROOPS[tid]["housing"]
+        return actual
+
+    gold = defender.get("gold", 0)
+    elixir = defender.get("elixir", 0)
+    total_res = gold + elixir
+
+    if has_wall and not has_tower:
+        # 有城墙没箭塔 → 空军最佳
+        _add("dragon", available.get("dragon", 0))
+        _add("balloon", available.get("balloon", 0))
+        _add("wizard", available.get("wizard", 0))
+        if total_res > 5000:
+            _add("goblin", min(available.get("goblin", 0), 5))
+    elif has_wall and has_tower:
+        # 有墙有塔 → 炸弹人破墙 + 地面重型
+        _add("wall_breaker", min(available.get("wall_breaker", 0), 5))
+        _add("giant", available.get("giant", 0))
+        _add("wizard", available.get("wizard", 0))
+        _add("dragon", available.get("dragon", 0))
+        if total_res > 5000:
+            _add("goblin", min(available.get("goblin", 0), 5))
+    else:
+        # 无墙 → 高攻优先
+        _add("dragon", available.get("dragon", 0))
+        _add("wizard", available.get("wizard", 0))
+        _add("balloon", available.get("balloon", 0))
+        _add("giant", available.get("giant", 0))
+        if total_res > 5000:
+            _add("goblin", min(available.get("goblin", 0), 5))
+
+    # 剩余空间填充
+    for tid in ("archer", "barbarian", "goblin"):
+        _add(tid, available.get(tid, 0))
+
+    return {tid: cnt for tid, cnt in result.items() if cnt > 0}
