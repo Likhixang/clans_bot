@@ -12,6 +12,11 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0").strip() or "0.0.0.0"
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8989"))
 WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
 
+POINTS_REDIS_HOST = os.getenv("POINTS_REDIS_HOST", "").strip()
+POINTS_REDIS_PORT = int(os.getenv("POINTS_REDIS_PORT", "6379"))
+POINTS_REDIS_DB = int(os.getenv("POINTS_REDIS_DB", "0"))
+POINTS_REDIS_PASSWORD = os.getenv("POINTS_REDIS_PASSWORD", "").strip()
+
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0"))
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 

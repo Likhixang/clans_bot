@@ -23,7 +23,7 @@ from models import (
     get_defense_power, get_available_troops,
     create_clan, get_clan, join_clan, leave_clan, list_clans,
     get_all_player_uids, incr_field, get_battle_log,
-    set_field,
+    set_field, merge_local_points_into_shared,
 )
 from combat import (
     find_target, find_targets, calculate_attack, execute_attack,
@@ -39,7 +39,13 @@ logger = logging.getLogger(__name__)
 # ───────────────────── 停机维护中间件 ─────────────────────
 
 # 超管命令白名单：维护期间仍允许超管执行这些命令
-_ADMIN_COMMANDS = {"clan_maintain", "clan_compensate", "clan_backup_db", "clan_restore_db"}
+_ADMIN_COMMANDS = {
+    "clan_maintain",
+    "clan_compensate",
+    "clan_backup_db",
+    "clan_restore_db",
+    "clan_merge_points",
+}
 
 
 class MaintenanceMiddleware(BaseMiddleware):
@@ -1273,6 +1279,42 @@ async def cmd_take(msg: types.Message):
 
     await add_points(target_uid, -amount)
     await msg.reply(f"✅ 已扣 {safe_html(p['name'])} 🪙 {fmt_num(amount)}")
+
+
+@router.message(Command("clan_merge_points"))
+async def cmd_merge_points(msg: types.Message):
+    if not _check(msg):
+        return
+    if msg.from_user.id != SUPER_ADMIN_ID:
+        return
+
+    uids = list(await get_all_player_uids())
+    marker_key = "coc:points_merge_done:v1"
+    merged_users = 0
+    skipped_users = 0
+    sum_local = 0.0
+    sum_shared = 0.0
+    sum_merged = 0.0
+
+    for uid in uids:
+        if await redis.hexists(marker_key, uid):
+            skipped_users += 1
+            continue
+        local_points, shared_points, merged_points = await merge_local_points_into_shared(uid)
+        await redis.hset(marker_key, uid, str(int(time.time())))
+        merged_users += 1
+        sum_local += local_points
+        sum_shared += shared_points
+        sum_merged += merged_points
+
+    await msg.reply(
+        "✅ <b>积分合并完成</b>\n"
+        f"处理玩家: {merged_users}，已跳过: {skipped_users}\n"
+        f"本次本地积分总和: {fmt_num(sum_local)}\n"
+        f"本次共享积分总和: {fmt_num(sum_shared)}\n"
+        f"合并后总和: {fmt_num(sum_merged)}\n\n"
+        "说明: 采用 <code>本地points + 共享积分(user_balance)</code> 合并，且每个UID仅执行一次。"
+    )
 
 
 @router.message(Command("clan_backup_db"))

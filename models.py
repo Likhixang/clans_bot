@@ -2,7 +2,7 @@ import json
 import time
 import uuid
 
-from core import redis
+from core import redis, points_redis
 from config import (
     STARTING_GOLD, STARTING_ELIXIR, STARTING_POINTS, STARTING_BUILDINGS,
     BUILDINGS, TROOPS, CLAN_MAX_MEMBERS, NEWBIE_SHIELD,
@@ -25,7 +25,11 @@ async def ensure_player(uid: str, name: str) -> dict:
         if data.get("name") != name:
             await redis.hset(f"coc:{uid}", "name", name)
             data["name"] = name
-        return _parse(data)
+        p = _parse(data)
+        p["points"] = await get_points(uid)
+        if abs(float(data.get("points", 0)) - p["points"]) > 1e-9:
+            await redis.hset(f"coc:{uid}", "points", str(p["points"]))
+        return p
     return await init_player(uid, name)
 
 
@@ -48,7 +52,10 @@ async def init_player(uid: str, name: str) -> dict:
     }
     await redis.hset(f"coc:{uid}", mapping=data)
     await redis.sadd("coc:all_players", uid)
-    return _parse(data)
+    p = _parse(data)
+    p["points"] = await get_points(uid)
+    await redis.hset(f"coc:{uid}", "points", str(p["points"]))
+    return p
 
 
 def _parse(data: dict) -> dict:
@@ -117,7 +124,35 @@ async def add_elixir(uid: str, amount: float):
 
 
 async def add_points(uid: str, amount: float):
-    await redis.hincrbyfloat(f"coc:{uid}", "points", round(amount, 2))
+    val = await points_redis.incrbyfloat(_points_key(uid), round(amount, 2))
+    await redis.hset(f"coc:{uid}", "points", str(round(float(val), 2)))
+
+
+def _points_key(uid: str) -> str:
+    return f"user_balance:{uid}"
+
+
+async def get_points(uid: str) -> float:
+    raw = await points_redis.get(_points_key(uid))
+    if raw is not None:
+        return round(float(raw), 2)
+
+    local_raw = await redis.hget(f"coc:{uid}", "points")
+    local_points = round(float(local_raw or 0), 2)
+    if local_points > 0:
+        await points_redis.set(_points_key(uid), local_points)
+    return local_points
+
+
+async def merge_local_points_into_shared(uid: str) -> tuple[float, float, float]:
+    local_raw = await redis.hget(f"coc:{uid}", "points")
+    local_points = round(float(local_raw or 0), 2)
+    shared_raw = await points_redis.get(_points_key(uid))
+    shared_points = round(float(shared_raw), 2) if shared_raw is not None else 0.0
+    merged = round(local_points + shared_points, 2)
+    await points_redis.set(_points_key(uid), merged)
+    await redis.hset(f"coc:{uid}", "points", str(merged))
+    return local_points, shared_points, merged
 
 
 async def set_field(uid: str, field: str, value):

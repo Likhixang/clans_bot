@@ -10,6 +10,9 @@ services:
       - .:/app
     depends_on:
       - redis
+    networks:
+      - default
+      - dice_shared
     logging:
       driver: "json-file"
       options:
@@ -31,3 +34,8 @@ services:
 
 volumes:
   redis_data:
+
+networks:
+  dice_shared:
+    external: true
+    name: dice_bot_default

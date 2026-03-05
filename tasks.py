@@ -4,12 +4,16 @@ import json
 import logging
 import sqlite3
 
-from core import bot, redis
+from core import bot, redis, points_redis
 from config import SUPER_ADMIN_ID, TZ_BJ
 
 logger = logging.getLogger(__name__)
 
 DB_FILE = "backup.db"
+
+
+def _points_key(uid: str) -> str:
+    return f"user_balance:{uid}"
 
 
 def _init_db(conn: sqlite3.Connection):
@@ -63,12 +67,14 @@ async def perform_backup() -> dict:
     for uid in player_uids:
         raw = await redis.hgetall(f"coc:{uid}")
         if raw:
+            shared_points_raw = await points_redis.get(_points_key(uid))
+            points_val = float(shared_points_raw) if shared_points_raw is not None else float(raw.get("points", 0))
             players_data.append((
                 uid,
                 raw.get("name", ""),
                 float(raw.get("gold", 0)),
                 float(raw.get("elixir", 0)),
-                float(raw.get("points", 0)),
+                points_val,
                 raw.get("buildings", "{}"),
                 raw.get("troops", "{}"),
                 float(raw.get("shield_until", 0)),
@@ -168,6 +174,7 @@ async def perform_restore() -> dict:
 
     # ── 恢复玩家 ──
     pipe = redis.pipeline()
+    points_pipe = points_redis.pipeline()
     pipe.delete("coc:all_players")
     for row in players:
         uid = row[0]
@@ -188,7 +195,9 @@ async def perform_restore() -> dict:
         }
         pipe.hset(f"coc:{uid}", mapping=mapping)
         pipe.sadd("coc:all_players", uid)
+        points_pipe.set(_points_key(uid), str(row[4]))
     await pipe.execute()
+    await points_pipe.execute()
 
     # ── 恢复部落 ──
     pipe = redis.pipeline()

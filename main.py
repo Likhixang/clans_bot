@@ -6,7 +6,7 @@ from aiogram.types import BotCommand, BotCommandScopeAllGroupChats
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from core import bot, dp, redis
+from core import bot, dp, redis, points_redis
 from handlers import router, _compensation_cleanup
 from tasks import hourly_backup_task
 from config import (
@@ -51,6 +51,7 @@ COMMANDS = [
     BotCommand(command="clan_take", description="[超管] 扣除积分"),
     BotCommand(command="clan_maintain", description="[超管] 停机维护"),
     BotCommand(command="clan_compensate", description="[超管] 停机补偿"),
+    BotCommand(command="clan_merge_points", description="[超管] 合并历史积分"),
     BotCommand(command="clan_backup_db", description="[超管] 备份数据库"),
     BotCommand(command="clan_restore_db", description="[超管] 恢复数据库"),
 ]
@@ -161,6 +162,11 @@ async def main():
             await redis.aclose()
         except Exception:
             pass
+        if points_redis is not redis:
+            try:
+                await points_redis.aclose()
+            except Exception:
+                pass
         await bot.session.close()
 
 
