@@ -8,6 +8,8 @@ from config import (
     BUILDINGS, TROOPS, CLAN_MAX_MEMBERS, NEWBIE_SHIELD,
 )
 
+SHARED_POINTS_INIT = 20000.0
+
 
 # ───────────────────── 玩家 ─────────────────────
 
@@ -35,11 +37,12 @@ async def ensure_player(uid: str, name: str) -> dict:
 
 async def init_player(uid: str, name: str) -> dict:
     now = time.time()
+    shared_points = await ensure_shared_points_account(uid)
     data = {
         "name": name,
         "gold": str(STARTING_GOLD),
         "elixir": str(STARTING_ELIXIR),
-        "points": str(STARTING_POINTS),
+        "points": str(shared_points),
         "buildings": json.dumps(STARTING_BUILDINGS),
         "troops": json.dumps({}),
         "shield_until": str(now + NEWBIE_SHIELD),
@@ -142,6 +145,13 @@ async def get_points(uid: str) -> float:
     if local_points > 0:
         await points_redis.set(_points_key(uid), local_points)
     return local_points
+
+
+async def ensure_shared_points_account(uid: str) -> float:
+    key = _points_key(uid)
+    await points_redis.setnx(key, SHARED_POINTS_INIT)
+    raw = await points_redis.get(key)
+    return round(float(raw or SHARED_POINTS_INIT), 2)
 
 
 async def merge_local_points_into_shared(uid: str) -> tuple[float, float, float]:
