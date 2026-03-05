@@ -1,4 +1,5 @@
 import json
+import math
 import time
 import uuid
 
@@ -11,13 +12,21 @@ from config import (
 SHARED_POINTS_INIT = 20000.0
 
 
+def _round_half_up(n: float) -> int:
+    if n >= 0:
+        return int(math.floor(n + 0.5))
+    return int(math.ceil(n - 0.5))
+
+
 # ───────────────────── 玩家 ─────────────────────
 
 async def get_player(uid: str) -> dict | None:
     data = await redis.hgetall(f"coc:{uid}")
     if not data:
         return None
-    return _parse(data)
+    p = _parse(data)
+    p["points"] = await get_points(uid)
+    return p
 
 
 async def ensure_player(uid: str, name: str) -> dict:
@@ -28,6 +37,11 @@ async def ensure_player(uid: str, name: str) -> dict:
             await redis.hset(f"coc:{uid}", "name", name)
             data["name"] = name
         p = _parse(data)
+        if str(p["gold"]) != str(data.get("gold", "")) or str(p["elixir"]) != str(data.get("elixir", "")):
+            await redis.hset(f"coc:{uid}", mapping={
+                "gold": str(p["gold"]),
+                "elixir": str(p["elixir"]),
+            })
         p["points"] = await get_points(uid)
         if abs(float(data.get("points", 0)) - p["points"]) > 1e-9:
             await redis.hset(f"coc:{uid}", "points", str(p["points"]))
@@ -64,8 +78,8 @@ async def init_player(uid: str, name: str) -> dict:
 def _parse(data: dict) -> dict:
     return {
         "name": data.get("name", "未知"),
-        "gold": round(float(data.get("gold", 0)), 2),
-        "elixir": round(float(data.get("elixir", 0)), 2),
+        "gold": _round_half_up(float(data.get("gold", 0))),
+        "elixir": _round_half_up(float(data.get("elixir", 0))),
         "points": round(float(data.get("points", 0)), 2),
         "buildings": json.loads(data.get("buildings", "{}")),
         "troops": json.loads(data.get("troops", "{}")),
@@ -80,7 +94,7 @@ def _parse(data: dict) -> dict:
 
 # ───────────────────── 资源收集 ─────────────────────
 
-async def collect_resources(uid: str, p: dict) -> tuple[float, float]:
+async def collect_resources(uid: str, p: dict) -> tuple[int, int]:
     """收集资源，返回 (gold_gained, elixir_gained)"""
     now = time.time()
     elapsed_h = (now - p["last_collect"]) / 3600
@@ -102,16 +116,18 @@ async def collect_resources(uid: str, p: dict) -> tuple[float, float]:
     new_gold = min(p["gold"] + gold_prod, max_gold)
     new_elix = min(p["elixir"] + elix_prod, max_elix)
 
-    gained_g = round(new_gold - p["gold"], 2)
-    gained_e = round(new_elix - p["elixir"], 2)
+    final_gold = _round_half_up(new_gold)
+    final_elix = _round_half_up(new_elix)
+    gained_g = final_gold - p["gold"]
+    gained_e = final_elix - p["elixir"]
 
     await redis.hset(f"coc:{uid}", mapping={
-        "gold": str(round(new_gold, 2)),
-        "elixir": str(round(new_elix, 2)),
+        "gold": str(final_gold),
+        "elixir": str(final_elix),
         "last_collect": str(now),
     })
-    p["gold"] = round(new_gold, 2)
-    p["elixir"] = round(new_elix, 2)
+    p["gold"] = final_gold
+    p["elixir"] = final_elix
     p["last_collect"] = now
     return gained_g, gained_e
 
@@ -119,11 +135,11 @@ async def collect_resources(uid: str, p: dict) -> tuple[float, float]:
 # ───────────────────── 资源操作 ─────────────────────
 
 async def add_gold(uid: str, amount: float):
-    await redis.hincrbyfloat(f"coc:{uid}", "gold", round(amount, 2))
+    await redis.hincrby(f"coc:{uid}", "gold", _round_half_up(amount))
 
 
 async def add_elixir(uid: str, amount: float):
-    await redis.hincrbyfloat(f"coc:{uid}", "elixir", round(amount, 2))
+    await redis.hincrby(f"coc:{uid}", "elixir", _round_half_up(amount))
 
 
 async def add_points(uid: str, amount: float):
