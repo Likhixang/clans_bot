@@ -98,12 +98,24 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     built_count = sum(1 for v in bld.values() if v > 0)
     total_slots = sum(1 for info in BUILDINGS.values()
                       if info["th_required"] <= th_lv)
+    gold_max = get_max_gold(p)
+    elixir_max = get_max_elixir(p)
+
+    def _bar(cur: int, cap: int, width: int = 10) -> str:
+        if cap <= 0:
+            return "░" * width
+        ratio = max(0.0, min(1.0, cur / cap))
+        fill = int(round(ratio * width))
+        return "▓" * fill + "░" * (width - fill)
 
     lines = [
-        f"🏰 <b>{safe_html(name)} 的村庄</b>  大本营 Lv.{th_lv} · {built_count}/{total_slots}",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "",
+        f"🏰 <b>{safe_html(name)} 的基地</b>",
+        f"🏠 大本营 Lv.{th_lv}  |  建筑进度 {built_count}/{total_slots}",
     ]
+    if clan_name:
+        lines.append(f"🏯 所属部落: <b>{safe_html(clan_name)}</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🗺️ <b>基地俯瞰</b>")
 
     # ── 城墙外观 ──
     wall_lv = bld.get("wall", 0)
@@ -136,8 +148,10 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
                         row_ch.append("🟫")
                     else:
                         row_ch.append("🔒")
-        lines.append("".join(row_ch))
+        lines.append(" ".join(row_ch))
 
+    lines.append("")
+    lines.append("图例: 🧱已建  🟫可建  🔒未解锁  🌿空地")
     lines.append("")
 
     # ── 图例：已建造 ──
@@ -146,28 +160,39 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
         lv = bld.get(bid, 0)
         if lv > 0:
             built_items.append(f"{info['emoji']}{info['name']} Lv.{lv}")
-    for i in range(0, len(built_items), 2):
-        lines.append("  ".join(built_items[i:i + 2]))
+    lines.append("🏗️ <b>已建建筑</b>")
+    if built_items:
+        for i in range(0, len(built_items), 2):
+            lines.append("  • " + "  |  ".join(built_items[i:i + 2]))
+    else:
+        lines.append("  • 暂无")
 
     # ── 图例：可建造 / 未解锁 ──
+    buildable = []
+    locked = []
     for bid, info in BUILDINGS.items():
         if bld.get(bid, 0) == 0:
             req = info["th_required"]
             if th_lv >= req:
-                lines.append(f"🟫 {info['name']} — 可建造")
+                buildable.append(info["name"])
             else:
-                lines.append(f"🔒 {info['name']} — 大本营 Lv.{req} 解锁")
+                locked.append(f"{info['name']}(Lv.{req})")
+
+    lines.append("")
+    lines.append("🧭 <b>下一步建议</b>")
+    lines.append(f"  • 可建造: {', '.join(buildable) if buildable else '无'}")
+    lines.append(f"  • 未解锁: {', '.join(locked) if locked else '无'}")
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(
-        f"💰 {fmt_num(p['gold'])}/{fmt_num(get_max_gold(p))}   "
-        f"💧 {fmt_num(p['elixir'])}/{fmt_num(get_max_elixir(p))}"
+        f"💰 金币 {fmt_num(p['gold'])}/{fmt_num(gold_max)}  [{_bar(p['gold'], gold_max)}]"
     )
     lines.append(
-        f"🏆 {p['trophies']}  "
-        f"⚔️ {p['attack_wins']}胜{p['attack_losses']}负  "
-        f"🛡️ {fmt_num(get_defense_power(p))}"
+        f"💧 圣水 {fmt_num(p['elixir'])}/{fmt_num(elixir_max)}  [{_bar(p['elixir'], elixir_max)}]"
+    )
+    lines.append(
+        f"🏆 奖杯 {p['trophies']}  |  ⚔️ 战绩 {p['attack_wins']}胜{p['attack_losses']}负  |  🛡️ 防御 {fmt_num(get_defense_power(p))}"
     )
     army_text = f"🗡️ 部队 {get_army_size(p)}/{get_army_capacity(p)}"
     if p["shield_until"] > time.time():
@@ -175,9 +200,6 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
         h, m = divmod(remain // 60, 60)
         army_text += f"  🛡️ 护盾 {h}h{m}m"
     lines.append(army_text)
-
-    if clan_name:
-        lines.append(f"🏯 {safe_html(clan_name)}")
 
     return "\n".join(lines)
 
@@ -256,11 +278,11 @@ async def cmd_help(msg: types.Message):
         "/clan_collect - 收集资源\n\n"
         "🏗️ <b>建造</b>\n"
         "/clan_shop - 建筑商店\n"
-        "/clan_build [建筑ID] - 建造新建筑\n"
-        "/clan_upgrade [建筑ID] - 升级建筑\n\n"
+        "/clan_build - 建造新建筑（推荐用商店按钮）\n"
+        "/clan_upgrade - 升级建筑（推荐用商店按钮）\n\n"
         "⚔️ <b>军事</b>\n"
         "/clan_troops - 可训练兵种列表\n"
-        "/clan_train [兵种ID] [数量] - 训练部队\n"
+        "/clan_train - 训练部队（推荐用部队按钮）\n"
         "/clan_army - 查看当前部队\n"
         "/clan_attack - 攻击其他玩家\n"
         "/clan_log - 战绩记录（按日查看）\n\n"
@@ -270,7 +292,7 @@ async def cmd_help(msg: types.Message):
         "/clan_create [名称] - 创建部落\n"
         "/clan_info - 查看部落信息\n"
         "/clan_list - 所有部落列表\n"
-        "/clan_join [部落ID] - 加入部落\n"
+        "/clan_join [部落名称] - 加入部落\n"
         "/clan_leave - 离开部落\n"
     )
     await msg.reply(text)
@@ -349,14 +371,14 @@ async def cmd_shop(msg: types.Message):
             res = "💰" if info["resource"] == "gold" else "💧"
             lines.append(
                 f"{info['emoji']} <b>{info['name']}</b> - 未建造\n"
-                f"  建造费: {res} {fmt_num(cost)} | /clan_build {bid}"
+                f"  建造费: {res} {fmt_num(cost)}"
             )
         elif cur_lv < max_lv:
             cost = info["costs"][cur_lv]
             res = "💰" if info["resource"] == "gold" else "💧"
             lines.append(
                 f"{info['emoji']} <b>{info['name']}</b> Lv.{cur_lv}\n"
-                f"  升级费: {res} {fmt_num(cost)} → Lv.{cur_lv + 1} | /clan_upgrade {bid}"
+                f"  升级费: {res} {fmt_num(cost)} → Lv.{cur_lv + 1}"
             )
         else:
             lines.append(
@@ -374,7 +396,7 @@ async def cmd_build(msg: types.Message):
         return
     args = msg.text.split()
     if len(args) < 2:
-        await msg.reply("用法: /clan_build [建筑ID]\n输入 /clan_shop 查看可建造建筑")
+        await msg.reply("请在 /clan_me → 🏪 商店 中选择建筑进行建造")
         return
 
     bid = args[1].lower()
@@ -387,7 +409,7 @@ async def cmd_build(msg: types.Message):
     bld = p["buildings"]
 
     if bld.get(bid, 0) > 0:
-        await msg.reply(f"❌ {BUILDINGS[bid]['name']}已建造，使用 /clan_upgrade {bid} 升级")
+        await msg.reply(f"❌ {BUILDINGS[bid]['name']}已建造，请在商店面板中执行升级")
         return
 
     info = BUILDINGS[bid]
@@ -426,7 +448,7 @@ async def cmd_upgrade(msg: types.Message):
         return
     args = msg.text.split()
     if len(args) < 2:
-        await msg.reply("用法: /clan_upgrade [建筑ID]\n输入 /clan_shop 查看可升级建筑")
+        await msg.reply("请在 /clan_me → 🏪 商店 中选择建筑进行升级")
         return
 
     bid = args[1].lower()
@@ -440,7 +462,7 @@ async def cmd_upgrade(msg: types.Message):
     cur_lv = bld.get(bid, 0)
 
     if cur_lv == 0:
-        await msg.reply(f"❌ 尚未建造 {BUILDINGS[bid]['name']}，使用 /clan_build {bid}")
+        await msg.reply(f"❌ 尚未建造 {BUILDINGS[bid]['name']}，请先在商店面板中建造")
         return
 
     info = BUILDINGS[bid]
@@ -509,10 +531,10 @@ async def cmd_troops(msg: types.Message):
         unlocked = tid in available
         lock = "" if unlocked else f"🔒 需要兵营 Lv.{t['barracks_level']}"
         lines.append(
-            f"{t['emoji']} <b>{t['name']}</b> ({tid})\n"
+            f"{t['emoji']} <b>{t['name']}</b>\n"
             f"  💧 费用: {t['cost']} | ⚔️ 战力: {t['power']} | 🏠 占用: {t['housing']}\n"
             f"  {t['desc']}\n"
-            f"  {lock if lock else '✅ 已解锁 → /clan_train ' + tid}"
+            f"  {lock if lock else '✅ 已解锁（可在部队面板训练）'}"
         )
 
     await msg.reply("\n".join(lines))
@@ -526,7 +548,7 @@ async def cmd_train(msg: types.Message):
         return
     args = msg.text.split()
     if len(args) < 2:
-        await msg.reply("用法: /clan_train [兵种ID] [数量]\n输入 /clan_troops 查看兵种")
+        await msg.reply("请在 /clan_me → 🗡️ 部队 中选择兵种进行训练")
         return
 
     tid = args[1].lower()
@@ -831,13 +853,21 @@ async def cmd_rank(msg: types.Message):
 
 # ───────────────────── 部落系统 ─────────────────────
 
+async def _find_clans_by_name(name: str) -> list[dict]:
+    target = name.strip().lower()
+    if not target:
+        return []
+    clans = await list_clans()
+    return [c for c in clans if c.get("name", "").strip().lower() == target]
+
+
 @router.message(Command("clan_create"))
 async def cmd_clan_create(msg: types.Message):
     if not _check(msg):
         return
     args = msg.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
-        await msg.reply("用法: /clan_create [部落名称]")
+        await msg.reply("用法: /clan_create [部落名称]\n或使用 /clan_me → 🏯 部落 → 创建部落")
         return
 
     clan_name = args[1].strip()
@@ -856,14 +886,18 @@ async def cmd_clan_create(msg: types.Message):
         await msg.reply(f"❌ 创建部落需要 💰 {fmt_num(CLAN_CREATE_COST)} 金币")
         return
 
+    dup = await _find_clans_by_name(clan_name)
+    if dup:
+        await msg.reply("❌ 已存在同名部落，请换一个名称")
+        return
+
     await add_gold(uid, -CLAN_CREATE_COST)
-    clan_id = await create_clan(uid, clan_name)
+    await create_clan(uid, clan_name)
 
     await msg.reply(
         f"🏯 部落 <b>{safe_html(clan_name)}</b> 创建成功！\n"
-        f"部落ID: <code>{clan_id}</code>\n"
         f"花费: 💰 {fmt_num(CLAN_CREATE_COST)}\n\n"
-        f"其他玩家可通过 /clan_join {clan_id} 加入"
+        "其他玩家可通过部落面板按钮或 /clan_join 部落名称 加入"
     )
 
 
@@ -871,12 +905,12 @@ async def cmd_clan_create(msg: types.Message):
 async def cmd_clan_join(msg: types.Message):
     if not _check(msg):
         return
-    args = msg.text.split()
+    args = msg.text.split(maxsplit=1)
     if len(args) < 2:
-        await msg.reply("用法: /clan_join [部落ID]\n输入 /clan_list 查看部落列表")
+        await msg.reply("用法: /clan_join [部落名称]\n或使用 /clan_me → 🏯 部落 按钮直接加入")
         return
 
-    clan_id = args[1]
+    clan_name = args[1].strip()
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
 
@@ -884,10 +918,15 @@ async def cmd_clan_join(msg: types.Message):
         await msg.reply("❌ 你已经在一个部落中，请先 /clan_leave")
         return
 
-    clan = await get_clan(clan_id)
-    if not clan:
-        await msg.reply("❌ 部落不存在")
+    matched = await _find_clans_by_name(clan_name)
+    if not matched:
+        await msg.reply("❌ 未找到该部落，请检查名称或使用按钮加入")
         return
+    if len(matched) > 1:
+        await msg.reply("❌ 存在重名部落，请使用 /clan_me → 🏯 部落 按钮加入")
+        return
+    clan = matched[0]
+    clan_id = clan["id"]
 
     ok = await join_clan(uid, clan_id)
     if not ok:
@@ -945,7 +984,6 @@ async def cmd_clan_info(msg: types.Message):
 
     text = (
         f"🏯 <b>{safe_html(clan['name'])}</b>\n"
-        f"ID: <code>{p['clan_id']}</code>\n"
         f"🏆 总奖杯: {total_trophies}\n"
         f"👥 成员: {len(members)}人\n\n"
         + "\n".join(member_lines)
@@ -962,16 +1000,65 @@ async def cmd_clan_list(msg: types.Message):
         await msg.reply("🏯 还没有部落，使用 /clan_create 创建一个！")
         return
 
+    uid, name = _uid(msg), _name(msg)
+    await ensure_player(uid, name)
+
     lines = ["🏯 <b>部落列表</b>\n"]
+    btns = []
     for c in clans:
         count = len(c.get("members", []))
         lines.append(
             f"  <b>{safe_html(c['name'])}</b>\n"
-            f"  ID: <code>{c['id']}</code> | 👥 {count}人\n"
-            f"  → /clan_join {c['id']}"
+            f"  👥 {count}人"
         )
+        btns.append([InlineKeyboardButton(
+            text=f"➕ 加入 {c['name']}",
+            callback_data=f"vm:cjoin:{c['id']}:{uid}",
+        )])
 
-    await msg.reply("\n".join(lines))
+    kb = InlineKeyboardMarkup(inline_keyboard=btns[:8]) if btns else None
+    await msg.reply("\n".join(lines), reply_markup=kb)
+
+
+@router.message(F.text)
+async def msg_clan_create_name(msg: types.Message):
+    if not _check(msg):
+        return
+    if not msg.from_user:
+        return
+    text = (msg.text or "").strip()
+    if not text or text.startswith("/"):
+        return
+
+    uid, name = _uid(msg), _name(msg)
+    pending_key = f"coc:pending_clan_create:{uid}"
+    if not await redis.exists(pending_key):
+        return
+
+    await redis.delete(pending_key)
+    clan_name = text
+    if len(clan_name) > 20:
+        await msg.reply("❌ 部落名称最长20个字符，请重新点击“创建部落”")
+        return
+
+    p = await ensure_player(uid, name)
+    if p["clan_id"]:
+        await msg.reply("❌ 你已经在一个部落中，请先离开当前部落")
+        return
+    if p["gold"] < CLAN_CREATE_COST:
+        await msg.reply(f"❌ 创建部落需要 💰 {fmt_num(CLAN_CREATE_COST)} 金币")
+        return
+    dup = await _find_clans_by_name(clan_name)
+    if dup:
+        await msg.reply("❌ 已存在同名部落，请换一个名称")
+        return
+
+    await add_gold(uid, -CLAN_CREATE_COST)
+    await create_clan(uid, clan_name)
+    await msg.reply(
+        f"🏯 部落 <b>{safe_html(clan_name)}</b> 创建成功！\n"
+        f"花费: 💰 {fmt_num(CLAN_CREATE_COST)}"
+    )
 
 
 # ───────────────────── 管理员命令 ─────────────────────
@@ -1240,18 +1327,18 @@ async def cmd_compensate(msg: types.Message):
             pass
         await delete_msg_by_id(chat_id, old_comp_msg)
 
-    # 6. 发送补偿公告并置顶
+    # 6. 发送补偿公告并置顶（固定带上“更新内容”区块）
+    desc = (extra_desc or LAST_FIX_DESC or "本次为稳定性维护与体验优化。").strip()
     body = (
-        f"🔧 <b>【停机补偿】</b>\n\n"
-        f"非常抱歉给大家带来不便！\n"
-        f"系统已向全体 <b>{len(uids)}</b> 名玩家发放 <b>+500</b> 💰金币 和 <b>+500</b> 💧圣水 补偿！\n"
+        f"🔧 <b>【停机补偿公告】</b>\n\n"
+        f"✅ 维护已完成，服务恢复正常。\n"
+        f"🎁 已向全体 <b>{len(uids)}</b> 名玩家发放补偿：\n"
+        f"• 💰 金币 <b>+500</b>\n"
+        f"• 💧 圣水 <b>+500</b>\n\n"
+        f"📋 <b>本次更新内容</b>\n"
+        f"{desc}\n\n"
+        f"感谢耐心等待，继续战斗！"
     )
-
-    desc = extra_desc or LAST_FIX_DESC
-    if desc:
-        body += f"\n📋 <b>本次更新内容：</b>\n{desc}\n"
-
-    body += "\n感谢耐心等待，继续战斗！"
 
     announce = await send(chat_id, body)
     try:
@@ -1978,13 +2065,18 @@ async def cb_village_panel(cb: types.CallbackQuery):
         if not p["clan_id"]:
             # 未加入部落 → 显示部落选项面板
             clans = await list_clans()
-            lines = ["🏯 <b>部落</b>\n", "你还没有加入任何部落\n"]
+            lines = [
+                "🏯 <b>部落中心</b>",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                "你当前未加入部落",
+                "",
+            ]
             btns = []
             if clans:
-                lines.append("📋 <b>可加入的部落：</b>")
+                lines.append("📋 <b>可加入部落</b>")
                 for c in clans[:6]:
                     count = len(c.get("members", []))
-                    lines.append(f"  • {safe_html(c['name'])}  👥 {count}人")
+                    lines.append(f"  • <b>{safe_html(c['name'])}</b>  |  👥 {count}人")
                     btns.append([InlineKeyboardButton(
                         text=f"➕ 加入 {c['name']}",
                         callback_data=f"vm:cjoin:{c['id']}:{uid}")])
@@ -2020,13 +2112,17 @@ async def cb_village_panel(cb: types.CallbackQuery):
                 total_trophies += mp["trophies"]
                 role = "👑" if m_uid == clan.get("leader") else "👤"
                 member_lines.append(
-                    f"  {role} {safe_html(mp['name'])}  🏆 {mp['trophies']}"
+                    f"  {role} {safe_html(mp['name'])}  |  🏆 {mp['trophies']}"
                 )
 
+        avg_trophy = int(total_trophies / len(members)) if members else 0
         text = (
             f"🏯 <b>{safe_html(clan['name'])}</b>\n"
-            f"ID: <code>{p['clan_id']}</code>\n"
-            f"🏆 总奖杯: {total_trophies}  👥 {len(members)}人\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 成员: {len(members)}人\n"
+            f"🏆 总奖杯: {total_trophies}\n"
+            f"📈 人均奖杯: {avg_trophy}\n\n"
+            f"👥 <b>成员列表</b>\n"
             + "\n".join(member_lines)
         )
         clan_btns = [
@@ -2073,22 +2169,35 @@ async def cb_village_panel(cb: types.CallbackQuery):
         if p["gold"] < CLAN_CREATE_COST:
             await cb.answer(f"❌ 金币不足！需要 {fmt_num(CLAN_CREATE_COST)}", show_alert=True)
             return
-        # 提示用户用命令创建（需要输入名称）
+        await redis.setex(f"coc:pending_clan_create:{uid}", 180, "1")
         text = (
             "🏗️ <b>创建部落</b>\n\n"
             f"费用: 💰 {fmt_num(CLAN_CREATE_COST)} 金币\n"
             f"你当前: 💰 {fmt_num(p['gold'])}\n\n"
-            "请发送命令创建（需要输入部落名称）：\n"
-            "<code>/clan_create 你的部落名</code>"
+            "请直接发送一条消息作为部落名称\n"
+            "（20个字符以内，3分钟内有效）"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ 返回", callback_data=f"vm:clan:{uid}")]
+            [InlineKeyboardButton(text="取消创建", callback_data=f"vm:ccancel:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回", callback_data=f"vm:clan:{uid}")],
         ])
         try:
             await cb.message.edit_text(text, reply_markup=kb)
         except Exception:
             pass
         await cb.answer()
+
+    elif action == "ccancel":
+        await redis.delete(f"coc:pending_clan_create:{uid}")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏯 返回部落中心", callback_data=f"vm:clan:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text("已取消创建部落", reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("已取消创建")
 
     elif action == "cleave":
         if not p["clan_id"]:

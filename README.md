@@ -56,16 +56,16 @@ docker compose up -d --build
 | `/clan_help` | 帮助信息 |
 | `/clan_collect` | 收集资源 |
 | `/clan_shop` | 建筑商店 |
-| `/clan_build <建筑ID>` | 建造新建筑 |
-| `/clan_upgrade <建筑ID>` | 升级建筑 |
+| `/clan_build` | 建造新建筑（推荐用商店按钮） |
+| `/clan_upgrade` | 升级建筑（推荐用商店按钮） |
 | `/clan_troops` | 兵种列表 |
-| `/clan_train <兵种ID> [数量]` | 训练部队 |
+| `/clan_train` | 训练部队（推荐用部队按钮） |
 | `/clan_army` | 查看当前部队 |
 | `/clan_attack` | 攻击其他玩家 |
 | `/clan_log` | 战绩记录（按日查看） |
 | `/clan_rank` | 奖杯排行榜 |
 | `/clan_create <名称>` | 创建部落 |
-| `/clan_join <部落ID>` | 加入部落 |
+| `/clan_join <部落名称>` | 加入部落 |
 | `/clan_leave` | 离开部落 |
 | `/clan_info` | 查看部落信息 |
 | `/clan_list` | 部落列表 |
