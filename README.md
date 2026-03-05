@@ -77,6 +77,8 @@ docker compose up -d --build
 | `/clan_restore_db` | [超管] 恢复数据库 |
 
 > 大多数功能可通过 `/clan_me` 面板上的按钮直接操作。
+>
+> 维护模式提示仅在 `ALLOWED_CHAT_ID + ALLOWED_THREAD_ID` 指定的业务话题内生效，不会干扰同群其他话题。
 
 ## 战斗系统
 

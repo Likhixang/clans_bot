@@ -51,6 +51,11 @@ class MaintenanceMiddleware(BaseMiddleware):
     ) -> Any:
         if isinstance(event, types.Message):
             chat_id = event.chat.id
+            # 仅在业务作用域内拦截维护提示，避免影响其他群/话题
+            if ALLOWED_CHAT_ID and chat_id != ALLOWED_CHAT_ID:
+                return await handler(event, data)
+            if ALLOWED_THREAD_ID and event.message_thread_id != ALLOWED_THREAD_ID:
+                return await handler(event, data)
             if await redis.exists(f"maintenance:{chat_id}"):
                 # 超管命令放行
                 if event.from_user and event.from_user.id == SUPER_ADMIN_ID:
@@ -64,6 +69,11 @@ class MaintenanceMiddleware(BaseMiddleware):
                 return
         elif isinstance(event, types.CallbackQuery):
             chat_id = event.message.chat.id if event.message else None
+            thread_id = event.message.message_thread_id if event.message else None
+            if ALLOWED_CHAT_ID and chat_id and chat_id != ALLOWED_CHAT_ID:
+                return await handler(event, data)
+            if ALLOWED_THREAD_ID and thread_id != ALLOWED_THREAD_ID:
+                return await handler(event, data)
             if chat_id and await redis.exists(f"maintenance:{chat_id}"):
                 try:
                     await event.answer("🔧 系统维护中，请稍后再试", show_alert=True)
@@ -1020,7 +1030,7 @@ async def cmd_clan_list(msg: types.Message):
     await msg.reply("\n".join(lines), reply_markup=kb)
 
 
-@router.message(F.text)
+@router.message(F.text & ~F.text.startswith("/"))
 async def msg_clan_create_name(msg: types.Message):
     if not _check(msg):
         return
