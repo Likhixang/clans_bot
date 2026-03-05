@@ -42,11 +42,11 @@ async def send(chat_id: int, text: str, reply_markup=None, delay_delete: int = 0
 
 
 def fmt_num(n: float) -> str:
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K"
-    return f"{int(n)}"
+    val = round(float(n), 2)
+    if abs(val - int(val)) < 1e-9:
+        return f"{int(val):,}"
+    text = f"{val:,.2f}"
+    return text.rstrip("0").rstrip(".")
 
 
 async def pin_in_topic(chat_id: int, message_id: int, disable_notification: bool = False):

@@ -19,6 +19,7 @@ def _init_db(conn: sqlite3.Connection):
         name TEXT,
         gold REAL,
         elixir REAL,
+        points REAL DEFAULT 0,
         buildings TEXT,
         troops TEXT,
         shield_until REAL,
@@ -29,6 +30,9 @@ def _init_db(conn: sqlite3.Connection):
         trophies INTEGER,
         created_at TEXT
     )''')
+    cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
+    if "points" not in cols:
+        c.execute("ALTER TABLE players ADD COLUMN points REAL DEFAULT 0")
     c.execute('''CREATE TABLE IF NOT EXISTS clans (
         clan_id TEXT PRIMARY KEY,
         name TEXT,
@@ -64,6 +68,7 @@ async def perform_backup() -> dict:
                 raw.get("name", ""),
                 float(raw.get("gold", 0)),
                 float(raw.get("elixir", 0)),
+                float(raw.get("points", 0)),
                 raw.get("buildings", "{}"),
                 raw.get("troops", "{}"),
                 float(raw.get("shield_until", 0)),
@@ -107,7 +112,7 @@ async def perform_backup() -> dict:
         c.execute("DELETE FROM clan_members")
         c.execute("DELETE FROM battle_logs")
         c.executemany(
-            "INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             players_data,
         )
         c.executemany(
@@ -141,7 +146,12 @@ async def perform_restore() -> dict:
         conn = sqlite3.connect(DB_FILE)
         _init_db(conn)
         c = conn.cursor()
-        c.execute("SELECT * FROM players")
+        cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
+        has_points = "points" in cols
+        if has_points:
+            c.execute("SELECT * FROM players")
+        else:
+            c.execute("SELECT uid,name,gold,elixir,0 as points,buildings,troops,shield_until,clan_id,last_collect,attack_wins,attack_losses,trophies,created_at FROM players")
         players = c.fetchall()
         c.execute("SELECT * FROM clans")
         clans = c.fetchall()
@@ -165,15 +175,16 @@ async def perform_restore() -> dict:
             "name": row[1],
             "gold": str(row[2]),
             "elixir": str(row[3]),
-            "buildings": row[4],
-            "troops": row[5],
-            "shield_until": str(row[6]),
-            "clan_id": row[7],
-            "last_collect": str(row[8]),
-            "attack_wins": str(row[9]),
-            "attack_losses": str(row[10]),
-            "trophies": str(row[11]),
-            "created_at": row[12],
+            "points": str(row[4]),
+            "buildings": row[5],
+            "troops": row[6],
+            "shield_until": str(row[7]),
+            "clan_id": row[8],
+            "last_collect": str(row[9]),
+            "attack_wins": str(row[10]),
+            "attack_losses": str(row[11]),
+            "trophies": str(row[12]),
+            "created_at": row[13],
         }
         pipe.hset(f"coc:{uid}", mapping=mapping)
         pipe.sadd("coc:all_players", uid)

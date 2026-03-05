@@ -4,7 +4,7 @@ import uuid
 
 from core import redis
 from config import (
-    STARTING_GOLD, STARTING_ELIXIR, STARTING_BUILDINGS,
+    STARTING_GOLD, STARTING_ELIXIR, STARTING_POINTS, STARTING_BUILDINGS,
     BUILDINGS, TROOPS, CLAN_MAX_MEMBERS, NEWBIE_SHIELD,
 )
 
@@ -35,6 +35,7 @@ async def init_player(uid: str, name: str) -> dict:
         "name": name,
         "gold": str(STARTING_GOLD),
         "elixir": str(STARTING_ELIXIR),
+        "points": str(STARTING_POINTS),
         "buildings": json.dumps(STARTING_BUILDINGS),
         "troops": json.dumps({}),
         "shield_until": str(now + NEWBIE_SHIELD),
@@ -55,6 +56,7 @@ def _parse(data: dict) -> dict:
         "name": data.get("name", "未知"),
         "gold": round(float(data.get("gold", 0)), 2),
         "elixir": round(float(data.get("elixir", 0)), 2),
+        "points": round(float(data.get("points", 0)), 2),
         "buildings": json.loads(data.get("buildings", "{}")),
         "troops": json.loads(data.get("troops", "{}")),
         "shield_until": float(data.get("shield_until", 0)),
@@ -112,6 +114,10 @@ async def add_gold(uid: str, amount: float):
 
 async def add_elixir(uid: str, amount: float):
     await redis.hincrbyfloat(f"coc:{uid}", "elixir", round(amount, 2))
+
+
+async def add_points(uid: str, amount: float):
+    await redis.hincrbyfloat(f"coc:{uid}", "points", round(amount, 2))
 
 
 async def set_field(uid: str, field: str, value):

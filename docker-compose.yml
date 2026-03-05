@@ -4,6 +4,8 @@ services:
     container_name: clans_bot
     restart: unless-stopped
     env_file: .env
+    ports:
+      - "127.0.0.1:${WEBHOOK_PORT:-8989}:${WEBHOOK_PORT:-8989}"
     volumes:
       - .:/app
     depends_on:

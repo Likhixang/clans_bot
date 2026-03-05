@@ -18,7 +18,7 @@ from config import (
 from core import redis, bot
 from models import (
     ensure_player, get_player, collect_resources,
-    add_gold, add_elixir, set_buildings, set_troops,
+    add_gold, add_elixir, add_points, set_buildings, set_troops,
     get_max_gold, get_max_elixir, get_army_capacity, get_army_size,
     get_defense_power, get_available_troops,
     create_clan, get_clan, join_clan, leave_clan, list_clans,
@@ -100,6 +100,11 @@ VILLAGE_POS = {
     (3, 2): "elixir_storage",
     (3, 3): None,              # 草地
 }
+
+
+def _has_enough_resource(current: float, required: float) -> bool:
+    # 资源按 2 位小数写入，比较时统一精度并给极小容差，避免边界值误判。
+    return round(float(current), 2) + 1e-9 >= float(required)
 
 
 def _render_village(p: dict, name: str, clan_name: str = "") -> str:
@@ -201,6 +206,7 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     lines.append(
         f"💧 圣水 {fmt_num(p['elixir'])}/{fmt_num(elixir_max)}  [{_bar(p['elixir'], elixir_max)}]"
     )
+    lines.append(f"🪙 积分 {fmt_num(p['points'])}")
     lines.append(
         f"🏆 奖杯 {p['trophies']}  |  ⚔️ 战绩 {p['attack_wins']}胜{p['attack_losses']}负  |  🛡️ 防御 {fmt_num(get_defense_power(p))}"
     )
@@ -269,7 +275,7 @@ async def cmd_start(msg: types.Message):
         shield_text = f"\n🛡️ 新手护盾: {h}小时{m}分钟（免受攻击）"
     text = (
         f"🏰 欢迎来到 <b>部落冲突</b>，{mention(uid, name)}！\n\n"
-        f"💰 金币: {fmt_num(p['gold'])}  💧 圣水: {fmt_num(p['elixir'])}"
+        f"💰 金币: {fmt_num(p['gold'])}  💧 圣水: {fmt_num(p['elixir'])}  🪙 积分: {fmt_num(p['points'])}"
         f"{shield_text}\n\n"
         "输入 /clan_help 查看所有命令"
     )
@@ -286,6 +292,9 @@ async def cmd_help(msg: types.Message):
         "/clan_start - 注册/进入游戏\n"
         "/clan_me - 查看个人信息\n"
         "/clan_collect - 收集资源\n\n"
+        "💱 <b>兑换</b>\n"
+        "/clan_buy [金币/圣水] [积分] - 积分1:1购买资源\n"
+        "/clan_swap [金币/圣水] [数量] - 金币/圣水互换（损耗2%）\n\n"
         "🏗️ <b>建造</b>\n"
         "/clan_shop - 建筑商店\n"
         "/clan_build - 建造新建筑（推荐用商店按钮）\n"
@@ -348,6 +357,126 @@ async def cmd_collect(msg: types.Message):
         f"💧 圣水 +{fmt_num(e)}  → {fmt_num(p['elixir'])}"
     )
     await msg.reply(text)
+
+
+# ───────────────────── /buy /swap ─────────────────────
+
+@router.message(Command("clan_buy"))
+async def cmd_buy(msg: types.Message):
+    if not _check(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 3:
+        await msg.reply("用法: /clan_buy [金币/圣水] [积分数量]")
+        return
+
+    target_alias = args[1].strip().lower()
+    target_map = {"金币": "gold", "圣水": "elixir"}
+    target = target_map.get(target_alias)
+    if not target:
+        await msg.reply("❌ 资源类型: 金币 或 圣水")
+        return
+
+    try:
+        points_cost = int(args[2])
+    except Exception:
+        await msg.reply("❌ 积分数量必须是正整数")
+        return
+    if points_cost <= 0:
+        await msg.reply("❌ 积分数量必须是正整数")
+        return
+
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    await collect_resources(uid, p)
+
+    if not _has_enough_resource(p["points"], points_cost):
+        await msg.reply(f"❌ 积分不足！需要 {fmt_num(points_cost)}，当前 {fmt_num(p['points'])}")
+        return
+
+    target_max = get_max_gold(p) if target == "gold" else get_max_elixir(p)
+    if p[target] + points_cost > target_max + 1e-9:
+        remain = max(int(target_max - p[target]), 0)
+        t_name = "金币" if target == "gold" else "圣水"
+        await msg.reply(
+            f"❌ {t_name}仓库容量不足，无法兑换 {fmt_num(points_cost)}\n"
+            f"当前容量剩余: {fmt_num(remain)}"
+        )
+        return
+
+    await add_points(uid, -points_cost)
+    if target == "gold":
+        await add_gold(uid, points_cost)
+    else:
+        await add_elixir(uid, points_cost)
+
+    await msg.reply(
+        f"✅ 兑换成功：消耗 🪙 {fmt_num(points_cost)} → 获得 {'💰' if target == 'gold' else '💧'} {fmt_num(points_cost)}"
+    )
+
+
+@router.message(Command("clan_swap"))
+async def cmd_swap(msg: types.Message):
+    if not _check(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 3:
+        await msg.reply("用法: /clan_swap [金币/圣水] [数量]")
+        return
+
+    source_alias = args[1].strip().lower()
+    source_map = {"金币": "gold", "圣水": "elixir"}
+    source = source_map.get(source_alias)
+    if not source:
+        await msg.reply("❌ 资源类型: 金币 或 圣水")
+        return
+
+    try:
+        amount = int(args[2])
+    except Exception:
+        await msg.reply("❌ 数量必须是正整数")
+        return
+    if amount <= 0:
+        await msg.reply("❌ 数量必须是正整数")
+        return
+
+    target = "elixir" if source == "gold" else "gold"
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    await collect_resources(uid, p)
+
+    if not _has_enough_resource(p[source], amount):
+        s_name = "金币" if source == "gold" else "圣水"
+        await msg.reply(f"❌ {s_name}不足！需要 {fmt_num(amount)}，当前 {fmt_num(p[source])}")
+        return
+
+    fee = int(round(amount * 0.02))
+    received = amount - fee
+    if received <= 0:
+        await msg.reply("❌ 兑换后数量为 0，请提高兑换数量")
+        return
+
+    target_max = get_max_gold(p) if target == "gold" else get_max_elixir(p)
+    if p[target] + received > target_max + 1e-9:
+        remain = max(int(target_max - p[target]), 0)
+        t_name = "金币" if target == "gold" else "圣水"
+        await msg.reply(
+            f"❌ {t_name}仓库容量不足，最多还能接收 {fmt_num(remain)}"
+        )
+        return
+
+    if source == "gold":
+        await add_gold(uid, -amount)
+        await add_elixir(uid, received)
+    else:
+        await add_elixir(uid, -amount)
+        await add_gold(uid, received)
+
+    await msg.reply(
+        f"✅ 兑换成功：{'💰' if source == 'gold' else '💧'} {fmt_num(amount)}"
+        f" → {'💧' if source == 'gold' else '💰'} {fmt_num(received)}\n"
+        f"手续费(2%): {fmt_num(fee)}（四舍五入）"
+    )
 
 
 # ───────────────────── /shop ─────────────────────
@@ -431,7 +560,7 @@ async def cmd_build(msg: types.Message):
     cost = info["costs"][0]
     res = info["resource"]
 
-    if p[res] < cost:
+    if not _has_enough_resource(p[res], cost):
         res_name = "金币" if res == "gold" else "圣水"
         await msg.reply(f"❌ {res_name}不足！需要 {fmt_num(cost)}，当前 {fmt_num(p[res])}")
         return
@@ -495,7 +624,7 @@ async def cmd_upgrade(msg: types.Message):
     cost = info["costs"][cur_lv]
     res = info["resource"]
 
-    if p[res] < cost:
+    if not _has_enough_resource(p[res], cost):
         res_name = "金币" if res == "gold" else "圣水"
         await msg.reply(f"❌ {res_name}不足！需要 {fmt_num(cost)}，当前 {fmt_num(p[res])}")
         return
@@ -601,7 +730,7 @@ async def cmd_train(msg: types.Message):
         return
 
     total_cost = t["cost"] * count
-    if p["elixir"] < total_cost:
+    if not _has_enough_resource(p["elixir"], total_cost):
         max_afford = int(p["elixir"] // t["cost"])
         await msg.reply(
             f"❌ 圣水不足！需要 {fmt_num(total_cost)}，当前 {fmt_num(p['elixir'])}\n"
@@ -892,7 +1021,7 @@ async def cmd_clan_create(msg: types.Message):
         await msg.reply("❌ 你已经在一个部落中，请先 /clan_leave")
         return
 
-    if p["gold"] < CLAN_CREATE_COST:
+    if not _has_enough_resource(p["gold"], CLAN_CREATE_COST):
         await msg.reply(f"❌ 创建部落需要 💰 {fmt_num(CLAN_CREATE_COST)} 金币")
         return
 
@@ -1055,7 +1184,7 @@ async def msg_clan_create_name(msg: types.Message):
     if p["clan_id"]:
         await msg.reply("❌ 你已经在一个部落中，请先离开当前部落")
         return
-    if p["gold"] < CLAN_CREATE_COST:
+    if not _has_enough_resource(p["gold"], CLAN_CREATE_COST):
         await msg.reply(f"❌ 创建部落需要 💰 {fmt_num(CLAN_CREATE_COST)} 金币")
         return
     dup = await _find_clans_by_name(clan_name)
@@ -1088,20 +1217,19 @@ async def cmd_give(msg: types.Message):
 
     args = msg.text.split()
 
-    # 回复某人消息: /clan_give gold 数量
+    # 回复某人消息: /clan_give 数量
     if msg.reply_to_message and msg.reply_to_message.from_user:
-        if len(args) < 3:
-            await msg.reply("用法: 回复某人消息 /clan_give [gold/elixir] [数量]")
+        if len(args) < 2:
+            await msg.reply("用法: 回复某人消息 /clan_give [数量]")
             return
         target_uid = str(msg.reply_to_message.from_user.id)
-        res = args[1].lower()
         try:
-            amount = int(args[2])
+            amount = int(args[1])
         except ValueError:
             await msg.reply("❌ 数量必须是数字")
             return
     else:
-        await msg.reply("❌ 请回复目标玩家的消息来使用此命令\n用法: 回复某人消息 /clan_give [gold/elixir] [数量]")
+        await msg.reply("❌ 请回复目标玩家的消息来使用此命令\n用法: 回复某人消息 /clan_give [数量]")
         return
 
     p = await get_player(target_uid)
@@ -1109,15 +1237,8 @@ async def cmd_give(msg: types.Message):
         await msg.reply("❌ 该玩家尚未注册游戏")
         return
 
-    if res == "gold":
-        await add_gold(target_uid, amount)
-    elif res == "elixir":
-        await add_elixir(target_uid, amount)
-    else:
-        await msg.reply("❌ 资源类型: gold 或 elixir")
-        return
-
-    await msg.reply(f"✅ 已给 {safe_html(p['name'])} {'💰' if res == 'gold' else '💧'} {fmt_num(amount)}")
+    await add_points(target_uid, amount)
+    await msg.reply(f"✅ 已给 {safe_html(p['name'])} 🪙 {fmt_num(amount)}")
 
 
 @router.message(Command("clan_take"))
@@ -1130,20 +1251,19 @@ async def cmd_take(msg: types.Message):
 
     args = msg.text.split()
 
-    # 回复某人消息: /clan_take gold 数量
+    # 回复某人消息: /clan_take 数量
     if msg.reply_to_message and msg.reply_to_message.from_user:
-        if len(args) < 3:
-            await msg.reply("用法: 回复某人消息 /clan_take [gold/elixir] [数量]")
+        if len(args) < 2:
+            await msg.reply("用法: 回复某人消息 /clan_take [数量]")
             return
         target_uid = str(msg.reply_to_message.from_user.id)
-        res = args[1].lower()
         try:
-            amount = int(args[2])
+            amount = int(args[1])
         except ValueError:
             await msg.reply("❌ 数量必须是数字")
             return
     else:
-        await msg.reply("❌ 请回复目标玩家的消息来使用此命令\n用法: 回复某人消息 /clan_take [gold/elixir] [数量]")
+        await msg.reply("❌ 请回复目标玩家的消息来使用此命令\n用法: 回复某人消息 /clan_take [数量]")
         return
 
     p = await get_player(target_uid)
@@ -1151,15 +1271,8 @@ async def cmd_take(msg: types.Message):
         await msg.reply("❌ 该玩家尚未注册游戏")
         return
 
-    if res == "gold":
-        await add_gold(target_uid, -amount)
-    elif res == "elixir":
-        await add_elixir(target_uid, -amount)
-    else:
-        await msg.reply("❌ 资源类型: gold 或 elixir")
-        return
-
-    await msg.reply(f"✅ 已扣 {safe_html(p['name'])} {'💰' if res == 'gold' else '💧'} {fmt_num(amount)}")
+    await add_points(target_uid, -amount)
+    await msg.reply(f"✅ 已扣 {safe_html(p['name'])} 🪙 {fmt_num(amount)}")
 
 
 @router.message(Command("clan_backup_db"))
@@ -1305,7 +1418,7 @@ async def cmd_compensate(msg: types.Message):
     # 解析可选的更新说明
     extra_desc = (msg.text or "").split(None, 1)[1].strip() if (msg.text or "").strip().count(" ") >= 1 else ""
 
-    # 1. 给所有注册玩家发放 +500 金币 和 +500 圣水
+    # 1. 给所有注册玩家发放补偿：金币+500、圣水+500（不含积分）
     uids = await get_all_player_uids()
     for uid in uids:
         await add_gold(uid, 500)
@@ -1344,7 +1457,8 @@ async def cmd_compensate(msg: types.Message):
         f"✅ 维护已完成，服务恢复正常。\n"
         f"🎁 已向全体 <b>{len(uids)}</b> 名玩家发放补偿：\n"
         f"• 💰 金币 <b>+500</b>\n"
-        f"• 💧 圣水 <b>+500</b>\n\n"
+        f"• 💧 圣水 <b>+500</b>\n"
+        f"• 🪙 积分 <b>+0</b>（本次不发放）\n\n"
         f"📋 <b>本次更新内容</b>\n"
         f"{desc}\n\n"
         f"感谢耐心等待，继续战斗！"
@@ -1581,7 +1695,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
             return
         cost = info["costs"][cur_lv]
         res = info["resource"]
-        if p[res] < cost:
+        if not _has_enough_resource(p[res], cost):
             res_name = "金币" if res == "gold" else "圣水"
             await cb.answer(f"❌ {res_name}不足！需要 {fmt_num(cost)}", show_alert=True)
             return
@@ -1630,7 +1744,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
             return
         cost = info["costs"][0]
         res = info["resource"]
-        if p[res] < cost:
+        if not _has_enough_resource(p[res], cost):
             res_name = "金币" if res == "gold" else "圣水"
             await cb.answer(f"❌ {res_name}不足！需要 {fmt_num(cost)}", show_alert=True)
             return
@@ -1814,7 +1928,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
             await cb.answer("❌ 兵营空间不足", show_alert=True)
             return
         total_cost = t["cost"] * count
-        if p["elixir"] < total_cost:
+        if not _has_enough_resource(p["elixir"], total_cost):
             await cb.answer("❌ 圣水不足", show_alert=True)
             return
         await add_elixir(uid, -total_cost)
@@ -2176,7 +2290,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
         if p["clan_id"]:
             await cb.answer("❌ 你已在一个部落中，请先离开", show_alert=True)
             return
-        if p["gold"] < CLAN_CREATE_COST:
+        if not _has_enough_resource(p["gold"], CLAN_CREATE_COST):
             await cb.answer(f"❌ 金币不足！需要 {fmt_num(CLAN_CREATE_COST)}", show_alert=True)
             return
         await redis.setex(f"coc:pending_clan_create:{uid}", 180, "1")
@@ -2269,6 +2383,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
             "  📦 收集 — 收取金矿/圣水产出\n"
             "  🏪 商店 — 建造/升级建筑\n"
             "  🗡️ 部队 — 查看与训练部队\n\n"
+            "💱 <b>兑换</b>\n"
+            "  /clan_buy 金币 100 — 消耗100积分兑换100金币\n"
+            "  /clan_swap 金币 100 — 金币转圣水（2%损耗）\n\n"
             "⚔️ <b>战斗</b>\n"
             "  ⚔️ 攻击 — 搜索对手并发起进攻\n"
             "  📜 战绩 — 查看最近战斗记录\n"

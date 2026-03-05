@@ -5,6 +5,13 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN missing")
 
+RUN_MODE = os.getenv("RUN_MODE", "webhook").strip().lower()
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "https://cl.khixang.dpdns.org").strip()
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0").strip() or "0.0.0.0"
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8989"))
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
+
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0"))
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
@@ -16,6 +23,7 @@ TZ_BJ = datetime.timezone(datetime.timedelta(hours=8))
 # ===== 初始状态 =====
 STARTING_GOLD = 1000
 STARTING_ELIXIR = 1000
+STARTING_POINTS = 0
 STARTING_BUILDINGS = {
     "town_hall": 1,
     "gold_mine": 1,
