@@ -1418,7 +1418,7 @@ async def cmd_compensate(msg: types.Message):
     # 解析可选的更新说明
     extra_desc = (msg.text or "").split(None, 1)[1].strip() if (msg.text or "").strip().count(" ") >= 1 else ""
 
-    # 1. 给所有注册玩家发放补偿：金币+500、圣水+500（不含积分）
+    # 1. 给所有注册玩家发放补偿：金币+500、圣水+500
     uids = await get_all_player_uids()
     for uid in uids:
         await add_gold(uid, 500)
@@ -1457,8 +1457,7 @@ async def cmd_compensate(msg: types.Message):
         f"✅ 维护已完成，服务恢复正常。\n"
         f"🎁 已向全体 <b>{len(uids)}</b> 名玩家发放补偿：\n"
         f"• 💰 金币 <b>+500</b>\n"
-        f"• 💧 圣水 <b>+500</b>\n"
-        f"• 🪙 积分 <b>+0</b>（本次不发放）\n\n"
+        f"• 💧 圣水 <b>+500</b>\n\n"
         f"📋 <b>本次更新内容</b>\n"
         f"{desc}\n\n"
         f"感谢耐心等待，继续战斗！"
