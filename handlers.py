@@ -246,9 +246,9 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📦 收集", callback_data=f"vm:collect:{uid}"),
-            InlineKeyboardButton(text="🤖 自动收集", callback_data=f"vm:auto:{uid}"),
             InlineKeyboardButton(text="🏪 商店", callback_data=f"vm:shop:{uid}"),
             InlineKeyboardButton(text="🗡️ 部队", callback_data=f"vm:army:{uid}"),
+            InlineKeyboardButton(text="💱 兑换", callback_data=f"vm:xchg:{uid}"),
         ],
         [
             InlineKeyboardButton(text="⚔️ 攻击", callback_data=f"vm:attack:{uid}"),
@@ -257,7 +257,6 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🏆 排行", callback_data=f"vm:rank:{uid}"),
-            InlineKeyboardButton(text="💱 兑换", callback_data=f"vm:xchg:{uid}"),
             InlineKeyboardButton(text="❓ 帮助", callback_data=f"vm:help:{uid}"),
             InlineKeyboardButton(text="🔄 刷新", callback_data=f"vm:refresh:{uid}"),
         ],
@@ -265,6 +264,7 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
 
 
 def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
+    auto_state = _auto_collect_text(p).replace("🤖 ", "")
     text = (
         "💱 <b>兑换中心</b>\n\n"
         f"💰 金币: {fmt_num(p['gold'])}\n"
@@ -273,7 +273,9 @@ def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup
         "规则：\n"
         "• 积分兑换资源：1:1\n"
         "• 金币/圣水互换：损耗 2%（四舍五入）\n"
-        "• 资源兑换积分：每100资源=1积分，另收2%资源税"
+        "• 资源兑换积分：每100资源=1积分，另收2%资源税\n"
+        f"• 自动收集：6小时，花费 💰/💧 {AUTO_COLLECT_COST}\n\n"
+        f"{auto_state}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -299,6 +301,10 @@ def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup
         [
             InlineKeyboardButton(text="💰5000 → 🪙50", callback_data=f"vm:xp:g:5000:{uid}"),
             InlineKeyboardButton(text="💧5000 → 🪙50", callback_data=f"vm:xp:e:5000:{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text=f"🤖 💰{AUTO_COLLECT_COST} 开6h", callback_data=f"vm:autob:g:{uid}"),
+            InlineKeyboardButton(text=f"🤖 💧{AUTO_COLLECT_COST} 开6h", callback_data=f"vm:autob:e:{uid}"),
         ],
         [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
     ])
@@ -367,7 +373,7 @@ async def cmd_help(msg: types.Message):
         "/clan_upgrade - 升级建筑（推荐用商店按钮）\n\n"
         "⚔️ <b>军事</b>\n"
         "/clan_troops - 可训练兵种列表\n"
-        "/clan_train - 训练部队（推荐用部队按钮）\n"
+        "/clan_train [兵种名] [数量] - 训练部队（支持中文兵种名，推荐用部队按钮）\n"
         "/clan_army - 查看当前部队\n"
         "/clan_attack - 攻击其他玩家\n"
         "/clan_log - 战绩记录（按日查看）\n\n"
@@ -805,10 +811,11 @@ async def cmd_train(msg: types.Message):
         return
     args = msg.text.split()
     if len(args) < 2:
-        await msg.reply("请在 /clan_me → 🗡️ 部队 中选择兵种进行训练")
+        await msg.reply("用法: /clan_train [兵种名] [数量]\n例如: /clan_train 野蛮人 10")
         return
 
-    tid = args[1].lower()
+    tid_input = args[1]
+    tid = _resolve_troop_id(tid_input)
     count = 1
     if len(args) >= 3:
         try:
@@ -821,7 +828,7 @@ async def cmd_train(msg: types.Message):
         return
 
     if tid not in TROOPS:
-        await msg.reply(f"❌ 未知兵种: {tid}\n输入 /clan_troops 查看列表")
+        await msg.reply(f"❌ 未知兵种: {tid_input}\n输入 /clan_troops 查看列表")
         return
 
     uid, name = _uid(msg), _name(msg)
@@ -901,6 +908,46 @@ async def cmd_army(msg: types.Message):
 
 _attack_locks: dict[str, float] = {}
 _attack_staging: dict[str, dict] = {}  # uid -> {"target_uid", "target_name", "troops": {tid: count}}
+
+
+def _norm_troop_token(value: str) -> str:
+    return (value or "").strip().lower().replace("_", "").replace(" ", "")
+
+
+_TROOP_ALIAS: dict[str, str] = {}
+for _tid, _info in TROOPS.items():
+    _aliases = {
+        _tid,
+        _tid.replace("_", ""),
+        _info.get("name", ""),
+    }
+    for _alias in _aliases:
+        _key = _norm_troop_token(_alias)
+        if _key:
+            _TROOP_ALIAS[_key] = _tid
+
+
+def _resolve_troop_id(raw: str) -> str:
+    token = _norm_troop_token(raw)
+    return _TROOP_ALIAS.get(token, token)
+
+
+def _pack_buttons_by_text(buttons: list[InlineKeyboardButton], max_units: int = 18) -> list[list[InlineKeyboardButton]]:
+    """按按钮文本长度自动排版，尽量避免同一行过长导致截断。"""
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    row_units = 0
+    for btn in buttons:
+        units = max(4, len(btn.text or ""))
+        if row and (row_units + units > max_units):
+            rows.append(row)
+            row = []
+            row_units = 0
+        row.append(btn)
+        row_units += units
+    if row:
+        rows.append(row)
+    return rows
 
 @router.message(Command("clan_attack"))
 async def cmd_attack(msg: types.Message):
@@ -1653,25 +1700,24 @@ async def cb_village_panel(cb: types.CallbackQuery):
         await cb.answer()
 
     elif action == "auto":
-        text = (
-            "🤖 <b>自动收集</b>\n\n"
-            "效果：开启后 6 小时内自动收集 💰金币 与 💧圣水\n"
-            f"价格：💰{AUTO_COLLECT_COST} 或 💧{AUTO_COLLECT_COST}\n\n"
-            f"{_auto_collect_text(p)}"
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"💰{AUTO_COLLECT_COST} 开启6小时", callback_data=f"vm:autob:g:{uid}")],
-            [InlineKeyboardButton(text=f"💧{AUTO_COLLECT_COST} 开启6小时", callback_data=f"vm:autob:e:{uid}")],
-            [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
-        ])
+        text, kb = _render_exchange_panel(uid, p)
         try:
-            await cb.message.edit_text(text, reply_markup=kb)
+            await cb.message.edit_text(
+                text + "\n\n🤖 自动收集已并入兑换中心，可直接在下方购买。",
+                reply_markup=kb,
+            )
         except Exception:
             pass
         await cb.answer()
 
     elif action == "autob":
+        if len(parts) < 4:
+            await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
+            return
         pay_code = parts[2]
+        if pay_code not in {"g", "e"}:
+            await cb.answer("❌ 支付类型错误", show_alert=True)
+            return
         pay_res = "gold" if pay_code == "g" else "elixir"
         pay_name = "金币" if pay_res == "gold" else "圣水"
         if not _has_enough_resource(p[pay_res], AUTO_COLLECT_COST):
@@ -1685,15 +1731,10 @@ async def cb_village_panel(cb: types.CallbackQuery):
         until = time.time() + AUTO_COLLECT_DURATION
         await set_field(uid, "auto_collect_until", until)
         p["auto_collect_until"] = until
-        clan_name = ""
-        if p["clan_id"]:
-            clan = await get_clan(p["clan_id"])
-            if clan:
-                clan_name = clan["name"]
-        text = _render_village(p, name, clan_name)
+        text, kb = _render_exchange_panel(uid, p)
         text += f"\n\n✅ 已消耗 {AUTO_COLLECT_COST}{'💰' if pay_res == 'gold' else '💧'} 开启自动收集 6 小时"
         try:
-            await cb.message.edit_text(text, reply_markup=_village_kb(uid))
+            await cb.message.edit_text(text, reply_markup=kb)
         except Exception:
             pass
         await cb.answer("✅ 自动收集已开启")
@@ -1825,8 +1866,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
         bld = p["buildings"]
         th_lv = bld.get("town_hall", 1)
         lines = ["🏪 <b>建筑商店</b>\n"]
-        buttons = []
-        row = []
+        action_buttons: list[InlineKeyboardButton] = []
         for bid, info in BUILDINGS.items():
             cur_lv = bld.get(bid, 0)
             req = info["th_required"]
@@ -1848,12 +1888,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
                 lines.append(
                     f"{info['emoji']} {info['name']} [未建造]{stat} | 建造: {res_icon}{fmt_num(cost)}"
                 )
-                row.append(InlineKeyboardButton(
+                action_buttons.append(InlineKeyboardButton(
                     text=f"{info['emoji']} {info['name']} [建造]",
                     callback_data=f"vm:bld:{bid}:{uid}"))
-                if len(row) == 2:
-                    buttons.append(row)
-                    row = []
             elif cur_lv >= max_lv:
                 # 满级
                 stat = ""
@@ -1868,12 +1905,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
                 lines.append(
                     f"{info['emoji']} {info['name']} Lv.{cur_lv} ✅{stat}"
                 )
-                row.append(InlineKeyboardButton(
+                action_buttons.append(InlineKeyboardButton(
                     text=f"{info['emoji']} {info['name']} Lv.{cur_lv} ✅",
                     callback_data=f"vm:bld:{bid}:{uid}"))
-                if len(row) == 2:
-                    buttons.append(row)
-                    row = []
             else:
                 # 可升级
                 cost = info["costs"][cur_lv]
@@ -1889,14 +1923,10 @@ async def cb_village_panel(cb: types.CallbackQuery):
                 lines.append(
                     f"{info['emoji']} {info['name']} Lv.{cur_lv}{stat} | 升级: {res_icon}{fmt_num(cost)} → Lv.{cur_lv + 1}"
                 )
-                row.append(InlineKeyboardButton(
+                action_buttons.append(InlineKeyboardButton(
                     text=f"{info['emoji']} {info['name']} Lv.{cur_lv}",
                     callback_data=f"vm:bld:{bid}:{uid}"))
-                if len(row) == 2:
-                    buttons.append(row)
-                    row = []
-        if row:
-            buttons.append(row)
+        buttons = _pack_buttons_by_text(action_buttons, max_units=16)
         buttons.append([
             InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}"),
         ])
@@ -2131,18 +2161,13 @@ async def cb_village_panel(cb: types.CallbackQuery):
         available = get_available_troops(p)
         lines.append(f"\n📋 可训练兵种 (兵营 Lv.{p['buildings'].get('barracks', 1)}):")
 
-        buttons = []
-        row = []
+        troop_buttons: list[InlineKeyboardButton] = []
         for tid in available:
             t = TROOPS[tid]
-            row.append(InlineKeyboardButton(
+            troop_buttons.append(InlineKeyboardButton(
                 text=f"{t['emoji']} {t['name']} 💧{t['cost']}",
                 callback_data=f"vm:sel:{tid}:{uid}"))
-            if len(row) == 2:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
+        buttons = _pack_buttons_by_text(troop_buttons, max_units=18)
         buttons.append([InlineKeyboardButton(
             text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2176,25 +2201,23 @@ async def cb_village_panel(cb: types.CallbackQuery):
             f"剩余空间: {space} | 💧 圣水: {fmt_num(p['elixir'])}",
         ]
 
-        buttons = []
-        row = []
+        options: list[InlineKeyboardButton] = []
         for cnt in [1, 5, 10]:
             if cnt <= actual_max:
                 cost = t["cost"] * cnt
-                row.append(InlineKeyboardButton(
+                options.append(InlineKeyboardButton(
                     text=f"×{cnt} ({fmt_num(cost)}💧)",
                     callback_data=f"vm:tr:{tid}:{cnt}:{uid}"))
         if actual_max > 0 and actual_max not in [1, 5, 10]:
             cost = t["cost"] * actual_max
-            row.append(InlineKeyboardButton(
+            options.append(InlineKeyboardButton(
                 text=f"最大 ×{actual_max}",
                 callback_data=f"vm:tr:{tid}:{actual_max}:{uid}"))
         elif actual_max in [1, 5, 10]:
             pass  # already covered
-        if not row:
+        if not options:
             lines.append("\n❌ 无法训练（空间或圣水不足）")
-        if row:
-            buttons.append(row)
+        buttons = _pack_buttons_by_text(options, max_units=22) if options else []
         buttons.append([InlineKeyboardButton(
             text="◀️ 返回部队", callback_data=f"vm:army:{uid}")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2805,42 +2828,42 @@ def _render_troop_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
             continue
         t = TROOPS[tid]
         sel = selected.get(tid, 0)
-        row = []
-        row.append(InlineKeyboardButton(
+        btns.append([InlineKeyboardButton(
             text=f"{t['emoji']}{t['name']} {sel}/{have}",
-            callback_data=f"vm:anop:{uid}"))
+            callback_data=f"vm:anop:{uid}")])
+        controls: list[InlineKeyboardButton] = []
         if sel > 0:
-            row.append(InlineKeyboardButton(
+            controls.append(InlineKeyboardButton(
                 text="➖", callback_data=f"vm:asel:{tid}:-1:{uid}"))
-            row.append(InlineKeyboardButton(
+            controls.append(InlineKeyboardButton(
                 text="清零", callback_data=f"vm:asel:{tid}:-{sel}:{uid}"))
         if sel < have:
-            row.append(InlineKeyboardButton(
+            controls.append(InlineKeyboardButton(
                 text="➕", callback_data=f"vm:asel:{tid}:1:{uid}"))
-            row.append(InlineKeyboardButton(
+            controls.append(InlineKeyboardButton(
                 text="全部", callback_data=f"vm:asel:{tid}:{have - sel}:{uid}"))
-        btns.append(row)
+        if controls:
+            btns.extend(_pack_buttons_by_text(controls, max_units=16))
 
     # 快捷操作行: 智能配兵 / 全部出战 / 清空
-    quick_row = []
-    quick_row.append(InlineKeyboardButton(
-        text="🧠 智能配兵", callback_data=f"vm:arec:{uid}"))
+    quick_buttons = [InlineKeyboardButton(
+        text="🧠 智能配兵", callback_data=f"vm:arec:{uid}")]
     has_any = any(v > 0 for v in selected.values())
     if not has_any:
-        quick_row.append(InlineKeyboardButton(
+        quick_buttons.append(InlineKeyboardButton(
             text="💪 全部出战", callback_data=f"vm:aall:{uid}"))
     else:
-        quick_row.append(InlineKeyboardButton(
+        quick_buttons.append(InlineKeyboardButton(
             text="🗑️ 清空", callback_data=f"vm:aclr:{uid}"))
-    btns.append(quick_row)
+    btns.extend(_pack_buttons_by_text(quick_buttons, max_units=18))
 
-    action_row = []
+    action_row: list[InlineKeyboardButton] = []
     if total_power > 0:
         action_row.append(InlineKeyboardButton(
             text="⚔️ 确认进攻！", callback_data=f"vm:ago:{uid}"))
     action_row.append(InlineKeyboardButton(
         text="◀️ 选目标", callback_data=f"vm:aback:{uid}"))
-    btns.append(action_row)
+    btns.extend(_pack_buttons_by_text(action_row, max_units=18))
 
     kb = InlineKeyboardMarkup(inline_keyboard=btns)
     return "\n".join(lines), kb
