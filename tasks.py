@@ -32,11 +32,14 @@ def _init_db(conn: sqlite3.Connection):
         attack_wins INTEGER,
         attack_losses INTEGER,
         trophies INTEGER,
+        auto_collect_until REAL DEFAULT 0,
         created_at TEXT
     )''')
     cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
     if "points" not in cols:
         c.execute("ALTER TABLE players ADD COLUMN points REAL DEFAULT 0")
+    if "auto_collect_until" not in cols:
+        c.execute("ALTER TABLE players ADD COLUMN auto_collect_until REAL DEFAULT 0")
     c.execute('''CREATE TABLE IF NOT EXISTS clans (
         clan_id TEXT PRIMARY KEY,
         name TEXT,
@@ -83,6 +86,7 @@ async def perform_backup() -> dict:
                 int(raw.get("attack_wins", 0)),
                 int(raw.get("attack_losses", 0)),
                 int(raw.get("trophies", 0)),
+                float(raw.get("auto_collect_until", 0)),
                 raw.get("created_at", ""),
             ))
         # 战斗日志
@@ -118,7 +122,7 @@ async def perform_backup() -> dict:
         c.execute("DELETE FROM clan_members")
         c.execute("DELETE FROM battle_logs")
         c.executemany(
-            "INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             players_data,
         )
         c.executemany(
@@ -148,16 +152,26 @@ async def perform_backup() -> dict:
 
 async def perform_restore() -> dict:
     """从 SQLite 恢复全部数据到 Redis，返回统计信息。"""
+    def _round_half_up(n: float) -> int:
+        if n >= 0:
+            return int(n + 0.5)
+        return int(n - 0.5)
+
     def db_read():
         conn = sqlite3.connect(DB_FILE)
         _init_db(conn)
         c = conn.cursor()
         cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
         has_points = "points" in cols
-        if has_points:
+        has_auto_collect = "auto_collect_until" in cols
+        if has_points and has_auto_collect:
             c.execute("SELECT * FROM players")
+        elif has_points and not has_auto_collect:
+            c.execute("SELECT uid,name,gold,elixir,points,buildings,troops,shield_until,clan_id,last_collect,attack_wins,attack_losses,trophies,0 as auto_collect_until,created_at FROM players")
+        elif (not has_points) and has_auto_collect:
+            c.execute("SELECT uid,name,gold,elixir,0 as points,buildings,troops,shield_until,clan_id,last_collect,attack_wins,attack_losses,trophies,auto_collect_until,created_at FROM players")
         else:
-            c.execute("SELECT uid,name,gold,elixir,0 as points,buildings,troops,shield_until,clan_id,last_collect,attack_wins,attack_losses,trophies,created_at FROM players")
+            c.execute("SELECT uid,name,gold,elixir,0 as points,buildings,troops,shield_until,clan_id,last_collect,attack_wins,attack_losses,trophies,0 as auto_collect_until,created_at FROM players")
         players = c.fetchall()
         c.execute("SELECT * FROM clans")
         clans = c.fetchall()
@@ -180,19 +194,20 @@ async def perform_restore() -> dict:
         uid = row[0]
         mapping = {
             "name": row[1],
-            "gold": str(row[2]),
-            "elixir": str(row[3]),
+            "gold": str(_round_half_up(float(row[2] or 0))),
+            "elixir": str(_round_half_up(float(row[3] or 0))),
             "points": str(row[4]),
             "buildings": row[5],
             "troops": row[6],
             "shield_until": str(row[7]),
             "clan_id": row[8],
-            "last_collect": str(row[9]),
-            "attack_wins": str(row[10]),
-            "attack_losses": str(row[11]),
-            "trophies": str(row[12]),
-            "created_at": row[13],
-        }
+                "last_collect": str(row[9]),
+                "attack_wins": str(row[10]),
+                "attack_losses": str(row[11]),
+                "trophies": str(row[12]),
+                "auto_collect_until": str(row[13]),
+                "created_at": row[14],
+            }
         pipe.hset(f"coc:{uid}", mapping=mapping)
         pipe.sadd("coc:all_players", uid)
         points_pipe.set(_points_key(uid), str(row[4]))

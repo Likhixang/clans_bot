@@ -18,6 +18,16 @@ def _round_half_up(n: float) -> int:
     return int(math.ceil(n - 0.5))
 
 
+def _to_int_str(raw) -> str:
+    if raw is None:
+        return "0"
+    s = str(raw).strip()
+    try:
+        return str(int(s))
+    except Exception:
+        return str(_round_half_up(float(s or 0)))
+
+
 # ───────────────────── 玩家 ─────────────────────
 
 async def get_player(uid: str) -> dict | None:
@@ -25,6 +35,11 @@ async def get_player(uid: str) -> dict | None:
     if not data:
         return None
     p = _parse(data)
+    if str(p["gold"]) != str(data.get("gold", "")) or str(p["elixir"]) != str(data.get("elixir", "")):
+        await redis.hset(f"coc:{uid}", mapping={
+            "gold": str(p["gold"]),
+            "elixir": str(p["elixir"]),
+        })
     p["points"] = await get_points(uid)
     return p
 
@@ -42,6 +57,8 @@ async def ensure_player(uid: str, name: str) -> dict:
                 "gold": str(p["gold"]),
                 "elixir": str(p["elixir"]),
             })
+        if "auto_collect_until" not in data:
+            await redis.hset(f"coc:{uid}", "auto_collect_until", "0")
         p["points"] = await get_points(uid)
         if abs(float(data.get("points", 0)) - p["points"]) > 1e-9:
             await redis.hset(f"coc:{uid}", "points", str(p["points"]))
@@ -65,6 +82,7 @@ async def init_player(uid: str, name: str) -> dict:
         "attack_wins": "0",
         "attack_losses": "0",
         "trophies": "0",
+        "auto_collect_until": "0",
         "created_at": str(now),
     }
     await redis.hset(f"coc:{uid}", mapping=data)
@@ -89,6 +107,7 @@ def _parse(data: dict) -> dict:
         "attack_wins": int(data.get("attack_wins", 0)),
         "attack_losses": int(data.get("attack_losses", 0)),
         "trophies": int(data.get("trophies", 0)),
+        "auto_collect_until": float(data.get("auto_collect_until", 0)),
     }
 
 
@@ -135,10 +154,12 @@ async def collect_resources(uid: str, p: dict) -> tuple[int, int]:
 # ───────────────────── 资源操作 ─────────────────────
 
 async def add_gold(uid: str, amount: float):
+    await _ensure_integer_resource_fields(uid)
     await redis.hincrby(f"coc:{uid}", "gold", _round_half_up(amount))
 
 
 async def add_elixir(uid: str, amount: float):
+    await _ensure_integer_resource_fields(uid)
     await redis.hincrby(f"coc:{uid}", "elixir", _round_half_up(amount))
 
 
@@ -170,15 +191,34 @@ async def ensure_shared_points_account(uid: str) -> float:
     return round(float(raw or SHARED_POINTS_INIT), 2)
 
 
-async def merge_local_points_into_shared(uid: str) -> tuple[float, float, float]:
-    local_raw = await redis.hget(f"coc:{uid}", "points")
-    local_points = round(float(local_raw or 0), 2)
-    shared_raw = await points_redis.get(_points_key(uid))
-    shared_points = round(float(shared_raw), 2) if shared_raw is not None else 0.0
-    merged = round(local_points + shared_points, 2)
-    await points_redis.set(_points_key(uid), merged)
-    await redis.hset(f"coc:{uid}", "points", str(merged))
-    return local_points, shared_points, merged
+async def _ensure_integer_resource_fields(uid: str):
+    key = f"coc:{uid}"
+    raw_gold, raw_elixir = await redis.hmget(key, "gold", "elixir")
+    int_gold = _to_int_str(raw_gold)
+    int_elixir = _to_int_str(raw_elixir)
+    if str(raw_gold) != int_gold or str(raw_elixir) != int_elixir:
+        await redis.hset(key, mapping={
+            "gold": int_gold,
+            "elixir": int_elixir,
+        })
+
+
+async def sanitize_all_player_resources() -> tuple[int, int]:
+    """全量清洗玩家资源字段，确保 gold/elixir 均为整数字符串。"""
+    uids = await redis.smembers("coc:all_players")
+    fixed = 0
+    for uid in uids:
+        key = f"coc:{uid}"
+        raw_gold, raw_elixir = await redis.hmget(key, "gold", "elixir")
+        int_gold = _to_int_str(raw_gold)
+        int_elixir = _to_int_str(raw_elixir)
+        if str(raw_gold) != int_gold or str(raw_elixir) != int_elixir:
+            await redis.hset(key, mapping={
+                "gold": int_gold,
+                "elixir": int_elixir,
+            })
+            fixed += 1
+    return len(uids), fixed
 
 
 async def set_field(uid: str, field: str, value):

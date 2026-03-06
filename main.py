@@ -8,6 +8,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 from core import bot, dp, redis, points_redis
 from handlers import router, _compensation_cleanup
+from models import sanitize_all_player_resources
 from tasks import hourly_backup_task
 from config import (
     RUN_MODE,
@@ -32,6 +33,7 @@ COMMANDS = [
     BotCommand(command="clan_collect", description="收集资源"),
     BotCommand(command="clan_buy", description="积分购买资源"),
     BotCommand(command="clan_swap", description="金币圣水互换"),
+    BotCommand(command="clan_sell", description="资源兑换积分"),
     BotCommand(command="clan_shop", description="建筑商店"),
     BotCommand(command="clan_build", description="建造新建筑"),
     BotCommand(command="clan_upgrade", description="升级建筑"),
@@ -51,7 +53,6 @@ COMMANDS = [
     BotCommand(command="clan_take", description="[超管] 扣除积分"),
     BotCommand(command="clan_maintain", description="[超管] 停机维护"),
     BotCommand(command="clan_compensate", description="[超管] 停机补偿"),
-    BotCommand(command="clan_merge_points", description="[超管] 合并历史积分"),
     BotCommand(command="clan_backup_db", description="[超管] 备份数据库"),
     BotCommand(command="clan_restore_db", description="[超管] 恢复数据库"),
 ]
@@ -94,6 +95,8 @@ async def _recover_compensation_pins():
 
 async def main():
     logger.info("Bot starting …")
+    total_players, fixed_players = await sanitize_all_player_resources()
+    logger.info("Resource normalization finished: total=%s fixed=%s", total_players, fixed_players)
     asyncio.create_task(hourly_backup_task())
     await _recover_compensation_pins()
     await bot.set_my_commands(COMMANDS)

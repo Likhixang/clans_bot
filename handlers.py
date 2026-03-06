@@ -23,7 +23,7 @@ from models import (
     get_defense_power, get_available_troops,
     create_clan, get_clan, join_clan, leave_clan, list_clans,
     get_all_player_uids, incr_field, get_battle_log,
-    set_field, merge_local_points_into_shared,
+    set_field,
 )
 from combat import (
     find_target, find_targets, calculate_attack, execute_attack,
@@ -35,6 +35,8 @@ from utils import safe_html, mention, fmt_num, send, pin_in_topic, auto_delete, 
 router = Router()
 
 logger = logging.getLogger(__name__)
+AUTO_COLLECT_COST = 300
+AUTO_COLLECT_DURATION = 6 * 3600
 
 # ───────────────────── 停机维护中间件 ─────────────────────
 
@@ -44,7 +46,6 @@ _ADMIN_COMMANDS = {
     "clan_compensate",
     "clan_backup_db",
     "clan_restore_db",
-    "clan_merge_points",
 }
 
 
@@ -109,8 +110,22 @@ VILLAGE_POS = {
 
 
 def _has_enough_resource(current: float, required: float) -> bool:
-    # 资源按 2 位小数写入，比较时统一精度并给极小容差，避免边界值误判。
-    return round(float(current), 2) + 1e-9 >= float(required)
+    return float(current) + 1e-9 >= float(required)
+
+
+def _auto_collect_text(p: dict) -> str:
+    until = float(p.get("auto_collect_until", 0))
+    if until <= time.time():
+        return "🤖 自动收集: 未开启"
+    remain = int(until - time.time())
+    h, m = divmod(remain // 60, 60)
+    return f"🤖 自动收集: 已开启（剩余 {h}小时{m}分钟）"
+
+
+async def _maybe_auto_collect(uid: str, p: dict) -> tuple[int, int]:
+    if float(p.get("auto_collect_until", 0)) <= time.time():
+        return 0, 0
+    return await collect_resources(uid, p)
 
 
 def _render_village(p: dict, name: str, clan_name: str = "") -> str:
@@ -216,6 +231,7 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     lines.append(
         f"🏆 奖杯 {p['trophies']}  |  ⚔️ 战绩 {p['attack_wins']}胜{p['attack_losses']}负  |  🛡️ 防御 {fmt_num(get_defense_power(p))}"
     )
+    lines.append(_auto_collect_text(p))
     army_text = f"🗡️ 部队 {get_army_size(p)}/{get_army_capacity(p)}"
     if p["shield_until"] > time.time():
         remain = int(p["shield_until"] - time.time())
@@ -230,6 +246,7 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📦 收集", callback_data=f"vm:collect:{uid}"),
+            InlineKeyboardButton(text="🤖 自动收集", callback_data=f"vm:auto:{uid}"),
             InlineKeyboardButton(text="🏪 商店", callback_data=f"vm:shop:{uid}"),
             InlineKeyboardButton(text="🗡️ 部队", callback_data=f"vm:army:{uid}"),
         ],
@@ -240,10 +257,52 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🏆 排行", callback_data=f"vm:rank:{uid}"),
+            InlineKeyboardButton(text="💱 兑换", callback_data=f"vm:xchg:{uid}"),
             InlineKeyboardButton(text="❓ 帮助", callback_data=f"vm:help:{uid}"),
             InlineKeyboardButton(text="🔄 刷新", callback_data=f"vm:refresh:{uid}"),
         ],
     ])
+
+
+def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "💱 <b>兑换中心</b>\n\n"
+        f"💰 金币: {fmt_num(p['gold'])}\n"
+        f"💧 圣水: {fmt_num(p['elixir'])}\n"
+        f"🪙 积分: {fmt_num(p['points'])}\n\n"
+        "规则：\n"
+        "• 积分兑换资源：1:1\n"
+        "• 金币/圣水互换：损耗 2%（四舍五入）\n"
+        "• 资源兑换积分：每100资源=1积分，另收2%资源税"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🪙100 → 💰", callback_data=f"vm:xb:g:100:{uid}"),
+            InlineKeyboardButton(text="🪙100 → 💧", callback_data=f"vm:xb:e:100:{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="🪙1000 → 💰", callback_data=f"vm:xb:g:1000:{uid}"),
+            InlineKeyboardButton(text="🪙1000 → 💧", callback_data=f"vm:xb:e:1000:{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="💰1000 → 💧", callback_data=f"vm:xs:g:1000:{uid}"),
+            InlineKeyboardButton(text="💧1000 → 💰", callback_data=f"vm:xs:e:1000:{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="💰5000 → 💧", callback_data=f"vm:xs:g:5000:{uid}"),
+            InlineKeyboardButton(text="💧5000 → 💰", callback_data=f"vm:xs:e:5000:{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="💰1000 → 🪙10", callback_data=f"vm:xp:g:1000:{uid}"),
+            InlineKeyboardButton(text="💧1000 → 🪙10", callback_data=f"vm:xp:e:1000:{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="💰5000 → 🪙50", callback_data=f"vm:xp:g:5000:{uid}"),
+            InlineKeyboardButton(text="💧5000 → 🪙50", callback_data=f"vm:xp:e:5000:{uid}"),
+        ],
+        [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
+    ])
+    return text, kb
 
 
 # ───────────────────── 权限检查 ─────────────────────
@@ -301,6 +360,7 @@ async def cmd_help(msg: types.Message):
         "💱 <b>兑换</b>\n"
         "/clan_buy [金币/圣水] [积分] - 积分1:1购买资源\n"
         "/clan_swap [金币/圣水] [数量] - 金币/圣水互换（损耗2%）\n\n"
+        "/clan_sell [金币/圣水] [数量] - 资源换积分（每100=1积分，另收2%资源税）\n\n"
         "🏗️ <b>建造</b>\n"
         "/clan_shop - 建筑商店\n"
         "/clan_build - 建造新建筑（推荐用商店按钮）\n"
@@ -331,7 +391,7 @@ async def cmd_me(msg: types.Message):
         return
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
-    await collect_resources(uid, p)
+    await _maybe_auto_collect(uid, p)
 
     clan_name = ""
     if p["clan_id"]:
@@ -394,7 +454,7 @@ async def cmd_buy(msg: types.Message):
 
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
-    await collect_resources(uid, p)
+    await _maybe_auto_collect(uid, p)
 
     if not _has_enough_resource(p["points"], points_cost):
         await msg.reply(f"❌ 积分不足！需要 {fmt_num(points_cost)}，当前 {fmt_num(p['points'])}")
@@ -449,7 +509,7 @@ async def cmd_swap(msg: types.Message):
     target = "elixir" if source == "gold" else "gold"
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
-    await collect_resources(uid, p)
+    await _maybe_auto_collect(uid, p)
 
     if not _has_enough_resource(p[source], amount):
         s_name = "金币" if source == "gold" else "圣水"
@@ -482,6 +542,58 @@ async def cmd_swap(msg: types.Message):
         f"✅ 兑换成功：{'💰' if source == 'gold' else '💧'} {fmt_num(amount)}"
         f" → {'💧' if source == 'gold' else '💰'} {fmt_num(received)}\n"
         f"手续费(2%): {fmt_num(fee)}（四舍五入）"
+    )
+
+
+@router.message(Command("clan_sell"))
+async def cmd_sell(msg: types.Message):
+    if not _check(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 3:
+        await msg.reply("用法: /clan_sell [金币/圣水] [数量，按100的倍数]")
+        return
+
+    source_alias = args[1].strip().lower()
+    source_map = {"金币": "gold", "圣水": "elixir"}
+    source = source_map.get(source_alias)
+    if not source:
+        await msg.reply("❌ 资源类型: 金币 或 圣水")
+        return
+
+    try:
+        amount = int(args[2])
+    except Exception:
+        await msg.reply("❌ 数量必须是正整数")
+        return
+    if amount <= 0 or amount % 100 != 0:
+        await msg.reply("❌ 数量必须是100的正整数倍")
+        return
+
+    points_gained = amount // 100
+    tax = int(round(amount * 0.02))
+    total_cost = amount + tax
+
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    await _maybe_auto_collect(uid, p)
+
+    if not _has_enough_resource(p[source], total_cost):
+        s_name = "金币" if source == "gold" else "圣水"
+        await msg.reply(
+            f"❌ {s_name}不足！需要 {fmt_num(total_cost)}（兑换 {fmt_num(amount)} + 税 {fmt_num(tax)}）"
+        )
+        return
+
+    if source == "gold":
+        await add_gold(uid, -total_cost)
+    else:
+        await add_elixir(uid, -total_cost)
+    await add_points(uid, points_gained)
+
+    await msg.reply(
+        f"✅ 兑换成功：{'💰' if source == 'gold' else '💧'} {fmt_num(amount)} → 🪙 {fmt_num(points_gained)}\n"
+        f"资源税(2%): {'💰' if source == 'gold' else '💧'} {fmt_num(tax)}"
     )
 
 
@@ -1281,42 +1393,6 @@ async def cmd_take(msg: types.Message):
     await msg.reply(f"✅ 已扣 {safe_html(p['name'])} 🪙 {fmt_num(amount)}")
 
 
-@router.message(Command("clan_merge_points"))
-async def cmd_merge_points(msg: types.Message):
-    if not _check(msg):
-        return
-    if msg.from_user.id != SUPER_ADMIN_ID:
-        return
-
-    uids = list(await get_all_player_uids())
-    marker_key = "coc:points_merge_done:v1"
-    merged_users = 0
-    skipped_users = 0
-    sum_local = 0.0
-    sum_shared = 0.0
-    sum_merged = 0.0
-
-    for uid in uids:
-        if await redis.hexists(marker_key, uid):
-            skipped_users += 1
-            continue
-        local_points, shared_points, merged_points = await merge_local_points_into_shared(uid)
-        await redis.hset(marker_key, uid, str(int(time.time())))
-        merged_users += 1
-        sum_local += local_points
-        sum_shared += shared_points
-        sum_merged += merged_points
-
-    await msg.reply(
-        "✅ <b>积分合并完成</b>\n"
-        f"处理玩家: {merged_users}，已跳过: {skipped_users}\n"
-        f"本次本地积分总和: {fmt_num(sum_local)}\n"
-        f"本次共享积分总和: {fmt_num(sum_shared)}\n"
-        f"合并后总和: {fmt_num(sum_merged)}\n\n"
-        "说明: 采用 <code>本地points + 共享积分(user_balance)</code> 合并，且每个UID仅执行一次。"
-    )
-
-
 @router.message(Command("clan_backup_db"))
 async def cmd_backup_db(msg: types.Message):
     if not _check(msg):
@@ -1533,6 +1609,8 @@ async def cb_village_panel(cb: types.CallbackQuery):
     uid = owner_uid
     name = cb.from_user.full_name or cb.from_user.username or "无名"
     p = await ensure_player(uid, name)
+    if action != "collect":
+        await _maybe_auto_collect(uid, p)
 
     if action == "refresh":
         await collect_resources(uid, p)
@@ -1565,6 +1643,183 @@ async def cb_village_panel(cb: types.CallbackQuery):
             except Exception:
                 pass
             await cb.answer(f"📦 💰+{fmt_num(g)} 💧+{fmt_num(e)}")
+
+    elif action == "xchg":
+        text, kb = _render_exchange_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "auto":
+        text = (
+            "🤖 <b>自动收集</b>\n\n"
+            "效果：开启后 6 小时内自动收集 💰金币 与 💧圣水\n"
+            f"价格：💰{AUTO_COLLECT_COST} 或 💧{AUTO_COLLECT_COST}\n\n"
+            f"{_auto_collect_text(p)}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"💰{AUTO_COLLECT_COST} 开启6小时", callback_data=f"vm:autob:g:{uid}")],
+            [InlineKeyboardButton(text=f"💧{AUTO_COLLECT_COST} 开启6小时", callback_data=f"vm:autob:e:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "autob":
+        pay_code = parts[2]
+        pay_res = "gold" if pay_code == "g" else "elixir"
+        pay_name = "金币" if pay_res == "gold" else "圣水"
+        if not _has_enough_resource(p[pay_res], AUTO_COLLECT_COST):
+            await cb.answer(f"❌ {pay_name}不足，需 {AUTO_COLLECT_COST}", show_alert=True)
+            return
+        if pay_res == "gold":
+            await add_gold(uid, -AUTO_COLLECT_COST)
+        else:
+            await add_elixir(uid, -AUTO_COLLECT_COST)
+        p[pay_res] -= AUTO_COLLECT_COST
+        until = time.time() + AUTO_COLLECT_DURATION
+        await set_field(uid, "auto_collect_until", until)
+        p["auto_collect_until"] = until
+        clan_name = ""
+        if p["clan_id"]:
+            clan = await get_clan(p["clan_id"])
+            if clan:
+                clan_name = clan["name"]
+        text = _render_village(p, name, clan_name)
+        text += f"\n\n✅ 已消耗 {AUTO_COLLECT_COST}{'💰' if pay_res == 'gold' else '💧'} 开启自动收集 6 小时"
+        try:
+            await cb.message.edit_text(text, reply_markup=_village_kb(uid))
+        except Exception:
+            pass
+        await cb.answer("✅ 自动收集已开启")
+
+    elif action == "xb":
+        target_code = parts[2]
+        amount = int(parts[3])
+        target = "gold" if target_code == "g" else "elixir"
+        target_name = "金币" if target == "gold" else "圣水"
+
+        if amount <= 0:
+            await cb.answer("❌ 数量必须大于0", show_alert=True)
+            return
+        if not _has_enough_resource(p["points"], amount):
+            await cb.answer("❌ 积分不足", show_alert=True)
+            return
+        target_max = get_max_gold(p) if target == "gold" else get_max_elixir(p)
+        if p[target] + amount > target_max + 1e-9:
+            remain = max(int(target_max - p[target]), 0)
+            await cb.answer(f"❌ {target_name}仓库容量不足，剩余 {fmt_num(remain)}", show_alert=True)
+            return
+
+        await add_points(uid, -amount)
+        if target == "gold":
+            await add_gold(uid, amount)
+        else:
+            await add_elixir(uid, amount)
+        p["points"] -= amount
+        p[target] += amount
+
+        text, kb = _render_exchange_panel(uid, p)
+        try:
+            await cb.message.edit_text(
+                text + f"\n\n✅ 已兑换：🪙{fmt_num(amount)} → {'💰' if target == 'gold' else '💧'}{fmt_num(amount)}",
+                reply_markup=kb,
+            )
+        except Exception:
+            pass
+        await cb.answer("✅ 兑换成功")
+
+    elif action == "xs":
+        source_code = parts[2]
+        amount = int(parts[3])
+        source = "gold" if source_code == "g" else "elixir"
+        target = "elixir" if source == "gold" else "gold"
+        source_name = "金币" if source == "gold" else "圣水"
+        target_name = "圣水" if source == "gold" else "金币"
+
+        if amount <= 0:
+            await cb.answer("❌ 数量必须大于0", show_alert=True)
+            return
+        if not _has_enough_resource(p[source], amount):
+            await cb.answer(f"❌ {source_name}不足", show_alert=True)
+            return
+
+        fee = int(round(amount * 0.02))
+        received = amount - fee
+        if received <= 0:
+            await cb.answer("❌ 兑换后数量为0", show_alert=True)
+            return
+
+        target_max = get_max_gold(p) if target == "gold" else get_max_elixir(p)
+        if p[target] + received > target_max + 1e-9:
+            remain = max(int(target_max - p[target]), 0)
+            await cb.answer(f"❌ {target_name}仓库容量不足，剩余 {fmt_num(remain)}", show_alert=True)
+            return
+
+        if source == "gold":
+            await add_gold(uid, -amount)
+            await add_elixir(uid, received)
+        else:
+            await add_elixir(uid, -amount)
+            await add_gold(uid, received)
+        p[source] -= amount
+        p[target] += received
+
+        text, kb = _render_exchange_panel(uid, p)
+        try:
+            await cb.message.edit_text(
+                text + (
+                    f"\n\n✅ 已兑换：{'💰' if source == 'gold' else '💧'}{fmt_num(amount)}"
+                    f" → {'💧' if source == 'gold' else '💰'}{fmt_num(received)}"
+                    f"（手续费 {fmt_num(fee)}）"
+                ),
+                reply_markup=kb,
+            )
+        except Exception:
+            pass
+        await cb.answer("✅ 兑换成功")
+
+    elif action == "xp":
+        source_code = parts[2]
+        amount = int(parts[3])
+        source = "gold" if source_code == "g" else "elixir"
+        source_name = "金币" if source == "gold" else "圣水"
+        if amount <= 0 or amount % 100 != 0:
+            await cb.answer("❌ 数量必须是100的正整数倍", show_alert=True)
+            return
+        points_gained = amount // 100
+        tax = int(round(amount * 0.02))
+        total_cost = amount + tax
+        if not _has_enough_resource(p[source], total_cost):
+            await cb.answer(
+                f"❌ {source_name}不足，需 {fmt_num(total_cost)}（兑换{fmt_num(amount)}+税{fmt_num(tax)}）",
+                show_alert=True,
+            )
+            return
+        if source == "gold":
+            await add_gold(uid, -total_cost)
+        else:
+            await add_elixir(uid, -total_cost)
+        await add_points(uid, points_gained)
+        p[source] -= total_cost
+        p["points"] += points_gained
+        text, kb = _render_exchange_panel(uid, p)
+        try:
+            await cb.message.edit_text(
+                text + (
+                    f"\n\n✅ 已兑换：{'💰' if source == 'gold' else '💧'}{fmt_num(amount)}"
+                    f" → 🪙{fmt_num(points_gained)}（资源税 {fmt_num(tax)}）"
+                ),
+                reply_markup=kb,
+            )
+        except Exception:
+            pass
+        await cb.answer("✅ 兑换成功")
 
     elif action == "shop":
         bld = p["buildings"]
@@ -2318,7 +2573,6 @@ async def cb_village_panel(cb: types.CallbackQuery):
         p["clan_id"] = clan_id
         # 刷新回村庄
         clan_name = clan["name"]
-        await collect_resources(uid, p)
         text = _render_village(p, name, clan_name)
         text += f"\n\n✅ 成功加入部落 <b>{safe_html(clan_name)}</b>！"
         try:
@@ -2372,7 +2626,6 @@ async def cb_village_panel(cb: types.CallbackQuery):
         clan_name = clan["name"] if clan else "未知"
         await leave_clan(uid, p["clan_id"])
         p["clan_id"] = ""
-        await collect_resources(uid, p)
         text = _render_village(p, name, "")
         text += f"\n\n👋 你已离开部落 <b>{safe_html(clan_name)}</b>"
         try:

@@ -64,6 +64,7 @@ docker compose up -d --build
 | `/clan_collect` | 收集资源 |
 | `/clan_buy <金币/圣水> <积分数量>` | 积分 1:1 购买资源 |
 | `/clan_swap <金币/圣水> <数量>` | 金币/圣水互相兑换（损耗 2%，按四舍五入扣损耗） |
+| `/clan_sell <金币/圣水> <数量>` | 资源兑换积分（每 100 资源=1 积分，另收 2% 资源税） |
 | `/clan_shop` | 建筑商店 |
 | `/clan_build` | 建造新建筑（推荐用商店按钮） |
 | `/clan_upgrade` | 升级建筑（推荐用商店按钮） |
@@ -82,7 +83,6 @@ docker compose up -d --build
 | `/clan_take <数量>` (回复消息) | [超管] 扣除积分 |
 | `/clan_maintain` | [超管] 停机维护（屏蔽所有操作，置顶公告） |
 | `/clan_compensate [更新说明]` | [超管] 停机补偿（全服仅补偿 金币+500、圣水+500） |
-| `/clan_merge_points` | [超管] 将 clans 本地历史 points 与共享积分一次性合并 |
 | `/clan_backup_db` | [超管] 备份数据库 |
 | `/clan_restore_db` | [超管] 恢复数据库 |
 
