@@ -397,7 +397,6 @@ async def cmd_me(msg: types.Message):
         return
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
-    await _maybe_auto_collect(uid, p)
 
     clan_name = ""
     if p["clan_id"]:
@@ -1656,11 +1655,11 @@ async def cb_village_panel(cb: types.CallbackQuery):
     uid = owner_uid
     name = cb.from_user.full_name or cb.from_user.username or "无名"
     p = await ensure_player(uid, name)
-    if action != "collect":
+    # 刷新面板不应触发收集；收集仅由显式操作或业务操作触发
+    if action not in {"collect", "refresh"}:
         await _maybe_auto_collect(uid, p)
 
     if action == "refresh":
-        await collect_resources(uid, p)
         clan_name = ""
         if p["clan_id"]:
             clan = await get_clan(p["clan_id"])

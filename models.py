@@ -113,12 +113,13 @@ def _parse(data: dict) -> dict:
 
 # ───────────────────── 资源收集 ─────────────────────
 
-async def collect_resources(uid: str, p: dict) -> tuple[int, int]:
-    """收集资源，返回 (gold_gained, elixir_gained)"""
+async def collect_resources(uid: str, p: dict, until_ts: float | None = None) -> tuple[int, int]:
+    """收集资源，返回 (gold_gained, elixir_gained)。可指定截止时间用于限时自动收集。"""
     now = time.time()
-    elapsed_h = (now - p["last_collect"]) / 3600
+    collect_to = now if until_ts is None else min(now, float(until_ts))
+    elapsed_h = (collect_to - p["last_collect"]) / 3600
     if elapsed_h < 0.005:  # < 18 秒
-        return 0.0, 0.0
+        return 0, 0
 
     bld = p["buildings"]
     gm = bld.get("gold_mine", 0)
@@ -143,11 +144,11 @@ async def collect_resources(uid: str, p: dict) -> tuple[int, int]:
     await redis.hset(f"coc:{uid}", mapping={
         "gold": str(final_gold),
         "elixir": str(final_elix),
-        "last_collect": str(now),
+        "last_collect": str(collect_to),
     })
     p["gold"] = final_gold
     p["elixir"] = final_elix
-    p["last_collect"] = now
+    p["last_collect"] = collect_to
     return gained_g, gained_e
 
 

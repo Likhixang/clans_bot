@@ -6,10 +6,12 @@ import sqlite3
 
 from core import bot, redis, points_redis
 from config import SUPER_ADMIN_ID, TZ_BJ
+from models import get_all_player_uids, get_player, collect_resources
 
 logger = logging.getLogger(__name__)
 
 DB_FILE = "backup.db"
+AUTO_COLLECT_TICK_SECONDS = 30
 
 
 def _points_key(uid: str) -> str:
@@ -287,3 +289,25 @@ async def hourly_backup_task():
             )
         except Exception as e:
             logger.error(f"每小时备份失败: {e}")
+
+
+async def auto_collect_task():
+    """后台自动收集：按周期结算处于自动收集有效期内的玩家。"""
+    while True:
+        try:
+            uids = await get_all_player_uids()
+            for uid in uids:
+                raw_until = await redis.hget(f"coc:{uid}", "auto_collect_until")
+                if not raw_until:
+                    continue
+                until = float(raw_until)
+                if until <= 0:
+                    continue
+                p = await get_player(uid)
+                if not p:
+                    continue
+                # 即使已过期，也补算到截止时刻，确保 6 小时收益完整到账。
+                await collect_resources(uid, p, until_ts=until)
+        except Exception as e:
+            logger.error(f"自动收集任务异常: {e}")
+        await asyncio.sleep(AUTO_COLLECT_TICK_SECONDS)
