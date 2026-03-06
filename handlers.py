@@ -948,6 +948,17 @@ def _pack_buttons_by_text(buttons: list[InlineKeyboardButton], max_units: int = 
         rows.append(row)
     return rows
 
+
+def _attack_block_reason(attacker_uid: str, attacker: dict, target_uid: str, target: dict | None) -> str | None:
+    if attacker_uid == target_uid:
+        return "❌ 不能攻击自己的基地"
+    if not target:
+        return "❌ 对方还没有基地，无法攻击"
+    if attacker.get("clan_id") and target.get("clan_id") == attacker.get("clan_id"):
+        return "❌ 同部落成员无法互相攻击"
+    return None
+
+
 @router.message(Command("clan_attack"))
 async def cmd_attack(msg: types.Message):
     if not _check(msg):
@@ -972,6 +983,38 @@ async def cmd_attack(msg: types.Message):
         await msg.reply(
             f"🛡️ 你有护盾保护（剩余 {h}小时{m}分钟）\n"
             "攻击将会移除护盾！",
+            reply_markup=kb,
+        )
+        return
+
+    # 回复某位玩家时：直接指向该玩家基地（机器人除外），需要二次确认
+    reply_user = msg.reply_to_message.from_user if msg.reply_to_message else None
+    if reply_user and not reply_user.is_bot:
+        target_uid = str(reply_user.id)
+        target = await get_player(target_uid)
+        block_reason = _attack_block_reason(uid, p, target_uid, target)
+        if block_reason:
+            await msg.reply(block_reason)
+            return
+        target_name = target["name"]
+        th_lv = target["buildings"].get("town_hall", 1)
+        defense = get_defense_power(target)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"⚔️ 确认攻击 {target_name}",
+                callback_data=f"vm:atkrt:{target_uid}:{uid}",
+            )],
+            [InlineKeyboardButton(
+                text="🔄 改为随机找目标",
+                callback_data=f"vm:attack:{uid}",
+            )],
+        ])
+        await msg.reply(
+            "🎯 检测到你在回复一名玩家，将对该玩家基地发起进攻。\n\n"
+            f"目标：{safe_html(target_name)}\n"
+            f"🏰 大本营Lv.{th_lv}  |  🏆 {target['trophies']}  |  🛡️ {fmt_num(defense)}\n"
+            f"💰 {fmt_num(target['gold'])}  💧 {fmt_num(target['elixir'])}\n\n"
+            "请点击按钮二次确认。",
             reply_markup=kb,
         )
         return
@@ -2339,8 +2382,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
         # 选择攻击目标，进入出兵面板
         target_uid = parts[2]
         target_p = await get_player(target_uid)
-        if not target_p:
-            await cb.answer("❌ 目标玩家不存在", show_alert=True)
+        block_reason = _attack_block_reason(uid, p, target_uid, target_p)
+        if block_reason:
+            await cb.answer(block_reason, show_alert=True)
             return
         _attack_staging[uid] = {
             "target_uid": target_uid,
@@ -2354,6 +2398,27 @@ async def cb_village_panel(cb: types.CallbackQuery):
         except Exception:
             pass
         await cb.answer()
+
+    elif action == "atkrt":
+        # 回复目标二次确认后：直接进入出兵面板
+        target_uid = parts[2]
+        target_p = await get_player(target_uid)
+        block_reason = _attack_block_reason(uid, p, target_uid, target_p)
+        if block_reason:
+            await cb.answer(block_reason, show_alert=True)
+            return
+        _attack_staging[uid] = {
+            "target_uid": target_uid,
+            "target_name": target_p["name"],
+            "target_data": target_p,
+            "troops": {},
+        }
+        text, kb = _render_troop_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("✅ 已锁定目标")
 
     elif action == "asel":
         # 调整兵种数量 vm:asel:{tid}:{delta}:{uid}
@@ -2446,8 +2511,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
             return
         target_uid = staging["target_uid"]
         defender = await get_player(target_uid)
-        if not defender:
-            await cb.answer("❌ 目标不存在", show_alert=True)
+        block_reason = _attack_block_reason(uid, p, target_uid, defender)
+        if block_reason:
+            await cb.answer(block_reason, show_alert=True)
             return
         if defender["shield_until"] > time.time():
             await cb.answer("❌ 对方已有护盾保护", show_alert=True)
