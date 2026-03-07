@@ -297,7 +297,7 @@ def get_army_size(p: dict) -> int:
 def get_defense_power(p: dict) -> float:
     total = 0
     bld = p["buildings"]
-    for bid in ("cannon", "archer_tower", "wall"):
+    for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower") + ["wall"]:
         lv = bld.get(bid, 0)
         if lv > 0:
             total += BUILDINGS[bid]["defense"][lv - 1]

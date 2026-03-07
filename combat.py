@@ -11,6 +11,11 @@ from models import (
     get_max_gold, get_max_elixir, add_battle_log,
 )
 
+def _building_series_ids(base_bid: str) -> list[str]:
+    ids = [bid for bid in BUILDINGS if bid == base_bid or bid.startswith(f"{base_bid}_")]
+    ids.sort(key=lambda x: (0 if x == base_bid else int(x.rsplit("_", 1)[1])))
+    return ids
+
 
 async def find_target(attacker_uid: str, attacker: dict) -> tuple[str, dict] | None:
     """随机找一个可攻击的对手（跳过同部落成员）"""
@@ -101,11 +106,11 @@ def calculate_attack(attacker: dict, defender: dict,
     tower_def = 0
     wall_def = 0
 
-    for bid in ("cannon", "archer_tower"):
+    for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower"):
         lv = bld.get(bid, 0)
         if lv > 0:
             val = BUILDINGS[bid]["defense"][lv - 1]
-            if bid == "cannon":
+            if bid == "cannon" or bid.startswith("cannon_"):
                 cannon_def += val
             else:
                 tower_def += val
@@ -287,11 +292,11 @@ def preview_attack(attacker: dict, defender: dict,
     cannon_def = 0
     tower_def = 0
     wall_def = 0
-    for bid in ("cannon", "archer_tower"):
+    for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower"):
         lv = bld.get(bid, 0)
         if lv > 0:
             val = BUILDINGS[bid]["defense"][lv - 1]
-            if bid == "cannon":
+            if bid == "cannon" or bid.startswith("cannon_"):
                 cannon_def += val
             else:
                 tower_def += val

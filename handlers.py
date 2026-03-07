@@ -95,58 +95,72 @@ router.callback_query.middleware(MaintenanceMiddleware())
 
 # ───────────────────── 村庄可视化 ─────────────────────
 
-# 基地地块解锁：TH 1-3 => 5x5，TH 4-6 => 7x7，TH 7+ => 9x9
+# 基地地块解锁：TH 1-3 => 5x5，TH 4-6 => 6x6，TH 7+ => 7x7
 VILLAGE_LAYOUT_BY_SIZE = {
     5: {
-        (1, 1): "cannon",
-        (1, 2): "barracks",
+        (1, 1): "wall",
+        (1, 2): "cannon",
         (1, 3): "archer_tower",
         (2, 1): "gold_mine",
         (2, 2): "town_hall",
         (2, 3): "elixir_collector",
         (3, 1): "gold_storage",
-        (3, 2): "elixir_storage",
+        (3, 2): "barracks",
+        (3, 3): "elixir_storage",
+    },
+    6: {
+        (1, 1): "wall",
+        (1, 2): "cannon",
+        (1, 3): "cannon_2",
+        (1, 4): "archer_tower",
+        (2, 1): "gold_mine",
+        (2, 2): "gold_mine_2",
+        (2, 3): "town_hall",
+        (2, 4): "elixir_collector",
+        (3, 1): "gold_storage",
+        (3, 2): "gold_storage_2",
+        (3, 3): "barracks",
+        (3, 4): "elixir_storage",
+        (4, 1): "elixir_collector_2",
+        (4, 2): "elixir_storage_2",
+        (4, 3): "archer_tower_2",
+        (4, 4): "cannon_3",
     },
     7: {
-        (2, 2): "cannon",
-        (2, 3): "barracks",
-        (2, 4): "archer_tower",
-        (3, 2): "gold_mine",
-        (3, 3): "town_hall",
-        (3, 4): "elixir_collector",
-        (4, 2): "gold_storage",
-        (4, 3): "gold_mine_2",
-        (4, 4): "elixir_storage",
-        (3, 1): "elixir_collector_2",
-        (5, 2): "gold_storage_2",
-        (5, 4): "elixir_storage_2",
-    },
-    9: {
-        (3, 3): "cannon",
-        (2, 4): "barracks",
-        (3, 5): "archer_tower",
-        (4, 3): "gold_mine",
-        (4, 4): "town_hall",
-        (4, 5): "elixir_collector",
-        (5, 3): "gold_storage",
-        (5, 4): "gold_mine_2",
-        (5, 5): "elixir_storage",
-        (4, 2): "elixir_collector_2",
-        (6, 3): "gold_storage_2",
-        (6, 5): "elixir_storage_2",
-        (3, 4): "gold_mine_3",
-        (4, 6): "elixir_collector_3",
-        (6, 4): "gold_storage_3",
-        (5, 6): "elixir_storage_3",
+        (1, 1): "wall",
+        (1, 2): "cannon",
+        (1, 3): "cannon_2",
+        (1, 4): "cannon_3",
+        (1, 5): "archer_tower",
+        (2, 1): "gold_mine",
+        (2, 2): "gold_mine_2",
+        (2, 3): "town_hall",
+        (2, 4): "elixir_collector",
+        (2, 5): "elixir_collector_2",
+        (3, 1): "gold_storage",
+        (3, 2): "gold_storage_2",
+        (3, 3): "barracks",
+        (3, 4): "elixir_storage",
+        (3, 5): "elixir_storage_2",
+        (4, 1): "gold_mine_3",
+        (4, 2): "elixir_collector_3",
+        (4, 3): "gold_storage_3",
+        (4, 4): "elixir_storage_3",
+        (4, 5): "archer_tower_2",
+        (5, 1): "cannon_4",
+        (5, 2): "cannon_5",
+        (5, 3): "archer_tower_3",
+        (5, 4): "archer_tower_4",
+        (5, 5): "archer_tower_5",
     },
 }
 
 
 def _village_size_by_th(th_lv: int) -> int:
     if th_lv >= 7:
-        return 9
-    if th_lv >= 4:
         return 7
+    if th_lv >= 4:
+        return 6
     return 5
 
 
@@ -155,6 +169,8 @@ RESOURCE_BUILDING_GROUPS: dict[str, dict[str, str]] = {
     "elixir_collector": {"title": "💧 圣水收集器", "emoji": "💧"},
     "gold_storage": {"title": "🏦 金币仓库", "emoji": "🏦"},
     "elixir_storage": {"title": "🧪 圣水仓库", "emoji": "🧪"},
+    "cannon": {"title": "💣 加农炮", "emoji": "💣"},
+    "archer_tower": {"title": "🏹 箭塔", "emoji": "🏹"},
 }
 
 
@@ -2059,6 +2075,10 @@ async def cb_village_panel(cb: types.CallbackQuery):
             ))
         lines.append("")
         lines.append("🏗️ <b>其他建筑</b>")
+        action_buttons.append(InlineKeyboardButton(
+            text="📊 资源产量速率",
+            callback_data=f"vm:rates:{uid}",
+        ))
 
         for bid, info in BUILDINGS.items():
             if bid in grouped_ids:
