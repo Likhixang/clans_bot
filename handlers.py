@@ -462,7 +462,7 @@ def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup
         "• 积分兑换资源：1:1\n"
         "• 金币/圣水互换：损耗 2%（四舍五入）\n"
         "• 资源兑换积分：每100资源=1积分，另收2%资源税\n"
-        f"• 自动收集：6小时，花费 💰/💧 {AUTO_COLLECT_COST}\n\n"
+        f"• 自动收集：6小时，花费 💰 {AUTO_COLLECT_COST}\n\n"
         f"{auto_state}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -490,10 +490,7 @@ def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup
             InlineKeyboardButton(text="💰5000 → 🪙50", callback_data=f"vm:xp:g:5000:{uid}"),
             InlineKeyboardButton(text="💧5000 → 🪙50", callback_data=f"vm:xp:e:5000:{uid}"),
         ],
-        [
-            InlineKeyboardButton(text=f"🤖 💰{AUTO_COLLECT_COST} 开6h", callback_data=f"vm:autob:g:{uid}"),
-            InlineKeyboardButton(text=f"🤖 💧{AUTO_COLLECT_COST} 开6h", callback_data=f"vm:autob:e:{uid}"),
-        ],
+        [InlineKeyboardButton(text=f"🤖 💰{AUTO_COLLECT_COST} 开6h", callback_data=f"vm:autob:g:{uid}")],
         [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
     ])
     return text, kb
@@ -552,7 +549,7 @@ async def cmd_help(msg: types.Message):
         "/clan_me - 查看个人信息\n"
         "/clan_collect - 收集资源\n\n"
         "💱 <b>兑换</b>\n"
-        "/clan_auto [金币/圣水] - 购买自动收集（6小时）\n"
+        "/clan_auto - 购买自动收集（6小时，300金币）\n"
         "/clan_buy [金币/圣水] [积分] - 积分1:1购买资源\n"
         "/clan_swap [金币/圣水] [数量] - 金币/圣水互换（损耗2%）\n\n"
         "/clan_sell [金币/圣水] [数量] - 资源换积分（每100=1积分，另收2%资源税）\n\n"
@@ -626,36 +623,25 @@ async def cmd_auto(msg: types.Message):
     if not _check(msg):
         return
     args = msg.text.split()
-    if len(args) < 2:
-        await msg.reply("用法: /clan_auto [金币/圣水]")
-        return
-
-    pay_alias = args[1].strip().lower()
-    pay_map = {"金币": "gold", "圣水": "elixir"}
-    pay_res = pay_map.get(pay_alias)
-    if not pay_res:
-        await msg.reply("❌ 资源类型: 金币 或 圣水")
+    if len(args) != 1:
+        await msg.reply("用法: /clan_auto")
         return
 
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
     await _maybe_auto_collect(uid, p)
 
-    pay_name = "金币" if pay_res == "gold" else "圣水"
-    if not _has_enough_resource(p[pay_res], AUTO_COLLECT_COST):
-        await msg.reply(f"❌ {pay_name}不足，需 {AUTO_COLLECT_COST}")
+    if not _has_enough_resource(p["gold"], AUTO_COLLECT_COST):
+        await msg.reply(f"❌ 金币不足，需 {AUTO_COLLECT_COST}")
         return
 
-    if pay_res == "gold":
-        await add_gold(uid, -AUTO_COLLECT_COST)
-    else:
-        await add_elixir(uid, -AUTO_COLLECT_COST)
-    p[pay_res] -= AUTO_COLLECT_COST
+    await add_gold(uid, -AUTO_COLLECT_COST)
+    p["gold"] -= AUTO_COLLECT_COST
     until = time.time() + AUTO_COLLECT_DURATION
     await set_field(uid, "auto_collect_until", until)
     p["auto_collect_until"] = until
     await msg.reply(
-        f"✅ 已消耗 {AUTO_COLLECT_COST}{'💰' if pay_res == 'gold' else '💧'} 开启自动收集 6 小时\n"
+        f"✅ 已消耗 {AUTO_COLLECT_COST}💰 开启自动收集 6 小时\n"
         f"{_auto_collect_text(p)}"
     )
 
@@ -905,9 +891,10 @@ async def cmd_build(msg: types.Message):
         await msg.reply("请在 /clan_me → 🏪 商店 中选择建筑进行建造")
         return
 
-    bid = args[1].lower()
-    if bid not in BUILDINGS:
-        await msg.reply(f"❌ 未知建筑: {bid}\n输入 /clan_shop 查看列表")
+    raw_bid = args[1]
+    bid = _resolve_building_id(raw_bid)
+    if not bid:
+        await msg.reply(f"❌ 未知建筑: {raw_bid}\n输入 /clan_shop 查看列表")
         return
 
     uid, name = _uid(msg), _name(msg)
@@ -2039,24 +2026,19 @@ async def cb_village_panel(cb: types.CallbackQuery):
             await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
             return
         pay_code = parts[2]
-        if pay_code not in {"g", "e"}:
-            await cb.answer("❌ 支付类型错误", show_alert=True)
+        if pay_code != "g":
+            await cb.answer("❌ 自动收集仅支持金币购买", show_alert=True)
             return
-        pay_res = "gold" if pay_code == "g" else "elixir"
-        pay_name = "金币" if pay_res == "gold" else "圣水"
-        if not _has_enough_resource(p[pay_res], AUTO_COLLECT_COST):
-            await cb.answer(f"❌ {pay_name}不足，需 {AUTO_COLLECT_COST}", show_alert=True)
+        if not _has_enough_resource(p["gold"], AUTO_COLLECT_COST):
+            await cb.answer(f"❌ 金币不足，需 {AUTO_COLLECT_COST}", show_alert=True)
             return
-        if pay_res == "gold":
-            await add_gold(uid, -AUTO_COLLECT_COST)
-        else:
-            await add_elixir(uid, -AUTO_COLLECT_COST)
-        p[pay_res] -= AUTO_COLLECT_COST
+        await add_gold(uid, -AUTO_COLLECT_COST)
+        p["gold"] -= AUTO_COLLECT_COST
         until = time.time() + AUTO_COLLECT_DURATION
         await set_field(uid, "auto_collect_until", until)
         p["auto_collect_until"] = until
         text, kb = _render_exchange_panel(uid, p)
-        text += f"\n\n✅ 已消耗 {AUTO_COLLECT_COST}{'💰' if pay_res == 'gold' else '💧'} 开启自动收集 6 小时"
+        text += f"\n\n✅ 已消耗 {AUTO_COLLECT_COST}💰 开启自动收集 6 小时"
         try:
             await cb.message.edit_text(text, reply_markup=kb)
         except Exception:
