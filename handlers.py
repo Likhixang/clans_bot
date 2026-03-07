@@ -1354,6 +1354,23 @@ def _format_battle_log_page(logs: list[dict], page: int = 0) -> tuple[str, list[
     return "\n".join(lines), date_keys
 
 
+def _extract_last_attack_troops(logs: list[dict]) -> dict[str, int]:
+    """提取最近一次进攻记录中的出战兵种。"""
+    for r in logs:
+        if r.get("type") != "attack":
+            continue
+        used = r.get("troops_used")
+        if not isinstance(used, dict):
+            continue
+        troops: dict[str, int] = {}
+        for tid, cnt in used.items():
+            if tid in TROOPS and isinstance(cnt, int) and cnt > 0:
+                troops[tid] = cnt
+        if troops:
+            return troops
+    return {}
+
+
 @router.message(Command("clan_log"))
 async def cmd_log(msg: types.Message):
     if not _check(msg):
@@ -2432,6 +2449,8 @@ async def cb_village_panel(cb: types.CallbackQuery):
         troops = p["troops"]
         cap = get_army_capacity(p)
         used = get_army_size(p)
+        logs = await get_battle_log(uid)
+        last_attack_troops = _extract_last_attack_troops(logs)
         lines = [f"🗡️ <b>部队</b> ({used}/{cap})\n"]
         total_power = 0
         if any(v > 0 for v in troops.values()):
@@ -2455,6 +2474,11 @@ async def cb_village_panel(cb: types.CallbackQuery):
                 text=f"{t['emoji']} {t['name']} 💧{t['cost']}",
                 callback_data=f"vm:sel:{tid}:{uid}"))
         buttons = _pack_buttons_by_text(troop_buttons, max_units=18)
+        if last_attack_troops:
+            buttons.append([InlineKeyboardButton(
+                text="🔁 一键训练上次出战部队",
+                callback_data=f"vm:trlast:{uid}",
+            )])
         buttons.append([InlineKeyboardButton(
             text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2556,6 +2580,61 @@ async def cb_village_panel(cb: types.CallbackQuery):
         except Exception:
             pass
         await cb.answer(f"✅ 训练了 {count}个{t['name']}")
+
+    elif action == "trlast":
+        logs = await get_battle_log(uid)
+        last_attack_troops = _extract_last_attack_troops(logs)
+        if not last_attack_troops:
+            await cb.answer("❌ 暂无上次出战记录", show_alert=True)
+            return
+
+        available = set(get_available_troops(p))
+        locked = [tid for tid in last_attack_troops if tid not in available]
+        if locked:
+            names = "、".join(TROOPS[tid]["name"] for tid in locked if tid in TROOPS)
+            await cb.answer(f"❌ 以下兵种当前未解锁：{names}", show_alert=True)
+            return
+
+        cap = get_army_capacity(p)
+        used = get_army_size(p)
+        space = cap - used
+        housing_needed = sum(TROOPS[tid]["housing"] * cnt for tid, cnt in last_attack_troops.items())
+        if housing_needed > space:
+            await cb.answer(f"❌ 兵营空间不足（需要 {housing_needed}，剩余 {space}）", show_alert=True)
+            return
+
+        total_cost = sum(TROOPS[tid]["cost"] * cnt for tid, cnt in last_attack_troops.items())
+        if not _has_enough_resource(p["elixir"], total_cost):
+            await cb.answer(
+                f"❌ 圣水不足（需要 {fmt_num(total_cost)}，当前 {fmt_num(p['elixir'])}）",
+                show_alert=True,
+            )
+            return
+
+        await add_elixir(uid, -total_cost)
+        troops = dict(p["troops"])
+        for tid, cnt in last_attack_troops.items():
+            troops[tid] = troops.get(tid, 0) + cnt
+        await set_troops(uid, troops)
+        p["elixir"] -= total_cost
+        p["troops"] = troops
+
+        troop_text = " ".join(f"{TROOPS[tid]['emoji']}×{cnt}" for tid, cnt in last_attack_troops.items())
+        text = (
+            f"✅ 已一键训练上次出战部队\n"
+            f"{troop_text}\n"
+            f"花费: 💧 {fmt_num(total_cost)}\n"
+            f"兵力: {used + housing_needed}/{cap}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ 返回部队", callback_data=f"vm:army:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("✅ 一键训练完成")
 
     elif action == "log":
         # 支持 vm:log:{uid} 和 vm:log:{page}:{uid} 两种格式
