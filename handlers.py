@@ -630,6 +630,9 @@ async def cmd_auto(msg: types.Message):
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
     await _maybe_auto_collect(uid, p)
+    if float(p.get("auto_collect_until", 0)) > time.time():
+        await msg.reply(f"❌ 自动收集已开启，{_auto_collect_text(p)}")
+        return
 
     if not _has_enough_resource(p["gold"], AUTO_COLLECT_COST):
         await msg.reply(f"❌ 金币不足，需 {AUTO_COLLECT_COST}")
@@ -2028,6 +2031,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
         pay_code = parts[2]
         if pay_code != "g":
             await cb.answer("❌ 自动收集仅支持金币购买", show_alert=True)
+            return
+        if float(p.get("auto_collect_until", 0)) > time.time():
+            await cb.answer(f"❌ {_auto_collect_text(p)}", show_alert=True)
             return
         if not _has_enough_resource(p["gold"], AUTO_COLLECT_COST):
             await cb.answer(f"❌ 金币不足，需 {AUTO_COLLECT_COST}", show_alert=True)
