@@ -1,7 +1,9 @@
 import asyncio
 import datetime
+import glob
 import json
 import logging
+import os
 import sqlite3
 
 from core import bot, redis, points_redis
@@ -11,11 +13,44 @@ from models import get_all_player_uids, get_player, collect_resources
 logger = logging.getLogger(__name__)
 
 DB_FILE = "backup.db"
+BACKUP_GLOB = "backup_*.db"
+BACKUP_KEEP = 3
 AUTO_COLLECT_TICK_SECONDS = 30
 
 
 def _points_key(uid: str) -> str:
     return f"user_balance:{uid}"
+
+
+def list_backup_files() -> list[str]:
+    files = sorted(glob.glob(BACKUP_GLOB), reverse=True)
+    if not files and os.path.exists(DB_FILE):
+        return [DB_FILE]
+    return files
+
+
+def get_latest_backup_path() -> str | None:
+    files = list_backup_files()
+    return files[0] if files else None
+
+
+def _new_backup_path() -> str:
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+    return f"backup_{ts}.db"
+
+
+def _prune_old_backups() -> None:
+    files = sorted(glob.glob(BACKUP_GLOB), reverse=True)
+    for stale in files[BACKUP_KEEP:]:
+        try:
+            os.remove(stale)
+        except OSError as e:
+            logger.warning("清理旧备份失败: %s err=%s", stale, e)
+    if files and os.path.exists(DB_FILE):
+        try:
+            os.remove(DB_FILE)
+        except OSError as e:
+            logger.warning("清理旧格式备份失败: %s err=%s", DB_FILE, e)
 
 
 def _init_db(conn: sqlite3.Connection):
@@ -114,39 +149,40 @@ async def perform_backup() -> dict:
             members_data.append((cid, m_uid))
 
     # ── 写入 SQLite（在线程中执行阻塞 IO）──
+    # 与 dice_bot 一致：使用 INSERT OR REPLACE 增量覆盖，不做全表清空。
+    backup_file = _new_backup_path()
+
     def db_write():
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(backup_file)
         _init_db(conn)
         c = conn.cursor()
         c.execute("BEGIN TRANSACTION")
-        c.execute("DELETE FROM players")
-        c.execute("DELETE FROM clans")
-        c.execute("DELETE FROM clan_members")
-        c.execute("DELETE FROM battle_logs")
         c.executemany(
-            "INSERT INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             players_data,
         )
         c.executemany(
-            "INSERT INTO clans VALUES (?,?,?,?,?)",
+            "INSERT OR REPLACE INTO clans VALUES (?,?,?,?,?)",
             clans_data,
         )
         c.executemany(
-            "INSERT INTO clan_members VALUES (?,?)",
+            "INSERT OR REPLACE INTO clan_members VALUES (?,?)",
             members_data,
         )
         c.executemany(
-            "INSERT INTO battle_logs VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO battle_logs VALUES (?,?,?)",
             battles_data,
         )
         conn.commit()
         conn.close()
 
     await asyncio.to_thread(db_write)
+    _prune_old_backups()
     stats = {
         "players": len(players_data),
         "clans": len(clans_data),
         "battles": len(battles_data),
+        "backup_file": backup_file,
     }
     logger.info(f"备份完成: {stats}")
     return stats
@@ -159,8 +195,12 @@ async def perform_restore() -> dict:
             return int(n + 0.5)
         return int(n - 0.5)
 
+    backup_file = get_latest_backup_path()
+    if not backup_file:
+        return {}
+
     def db_read():
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(backup_file)
         _init_db(conn)
         c = conn.cursor()
         cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
@@ -262,6 +302,7 @@ async def perform_restore() -> dict:
         "players": len(players),
         "clans": len(clans),
         "battles": len(battles),
+        "backup_file": backup_file,
     }
     logger.info(f"恢复完成: {stats}")
     return stats
@@ -276,6 +317,7 @@ async def hourly_backup_task():
 
         try:
             stats = await perform_backup()
+            latest = stats.get("backup_file") or get_latest_backup_path() or "无"
             await bot.send_message(
                 chat_id=SUPER_ADMIN_ID,
                 text=(
@@ -284,7 +326,8 @@ async def hourly_backup_task():
                     f"👤 玩家：<b>{stats['players']}</b> 条\n"
                     f"🏯 部落：<b>{stats['clans']}</b> 个\n"
                     f"⚔️ 战斗日志：<b>{stats['battles']}</b> 条\n"
-                    f"✅ 已安全写入本地 <code>backup.db</code> 物理数据库。"
+                    f"🗂 最新备份：<code>{latest}</code>\n"
+                    f"♻️ 仅保留最近 <b>{BACKUP_KEEP}</b> 份。"
                 ),
             )
         except Exception as e:
