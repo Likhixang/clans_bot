@@ -28,9 +28,9 @@ from models import (
 )
 from combat import (
     find_target, find_targets, calculate_attack, execute_attack,
-    preview_attack, recommend_troops,
+    preview_attack, recommend_troops, _pending_collectable,
 )
-from tasks import perform_backup, perform_restore
+from tasks import perform_backup, perform_restore, get_latest_backup_path, BACKUP_KEEP
 from utils import safe_html, mention, fmt_num, send, pin_in_topic, auto_delete, delete_msg_by_id
 
 router = Router()
@@ -1707,11 +1707,14 @@ async def cmd_backup_db(msg: types.Message):
     if msg.from_user.id != SUPER_ADMIN_ID:
         return
     stats = await perform_backup()
+    latest = stats.get("backup_file") or get_latest_backup_path() or "无"
     await msg.reply(
         f"✅ <b>手动备份完成！</b>\n"
         f"👤 玩家：{stats['players']} 条\n"
         f"🏯 部落：{stats['clans']} 个\n"
-        f"⚔️ 战斗日志：{stats['battles']} 条"
+        f"⚔️ 战斗日志：{stats['battles']} 条\n"
+        f"🗂 最新备份：<code>{latest}</code>\n"
+        f"♻️ 仅保留最近 <b>{BACKUP_KEEP}</b> 份。"
     )
 
 
@@ -1725,9 +1728,12 @@ async def cmd_restore_db(msg: types.Message):
         InlineKeyboardButton(text="⚠️ 确认覆盖恢复", callback_data="clan_confirm_restore"),
         InlineKeyboardButton(text="❌ 取消", callback_data="clan_cancel_restore"),
     ]])
+    latest = get_latest_backup_path()
+    latest_text = f"<code>{latest}</code>" if latest else "（未找到可用备份）"
     await msg.reply(
         "⚠️ <b>高危操作警告</b> ⚠️\n\n"
-        "此操作将用 <code>backup.db</code> 中的数据覆写当前 Redis！\n"
+        "此操作将用最新备份的数据覆写当前 Redis！\n"
+        f"将使用：{latest_text}\n"
         "确定要恢复吗？",
         reply_markup=markup,
     )
@@ -1752,6 +1758,7 @@ async def cb_confirm_restore(cb: types.CallbackQuery):
     try:
         await cb.message.edit_text(
             f"✅ <b>系统恢复成功！</b>\n"
+            f"来源文件：<code>{stats.get('backup_file', '未知')}</code>\n"
             f"👤 玩家：{stats['players']} 条\n"
             f"🏯 部落：{stats['clans']} 个\n"
             f"⚔️ 战斗日志：{stats['battles']} 条"
@@ -3141,8 +3148,13 @@ def _render_troop_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
                 def_parts.append(f"{BUILDINGS[bid]['emoji']}{BUILDINGS[bid]['name']}Lv.{lv}")
         if def_parts:
             lines.append(f"🎯 防御: {' | '.join(def_parts)}")
+        pending_gold = _pending_collectable(target_data, "gold")
+        pending_elixir = _pending_collectable(target_data, "elixir")
         lines.append(
-            f"💰{fmt_num(target_data['gold'])} 💧{fmt_num(target_data['elixir'])}"
+            f"💰仓库:{fmt_num(target_data['gold'])} + 收集器:{fmt_num(pending_gold)}"
+        )
+        lines.append(
+            f"💧仓库:{fmt_num(target_data['elixir'])} + 收集器:{fmt_num(pending_elixir)}"
         )
         lines.append("")
 
