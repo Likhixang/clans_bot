@@ -163,7 +163,8 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     else:
         wall_ch = "🌲"
 
-    # ── 渲染 5×5 网格 ──
+    # ── 渲染 5×5 网格（预格式化显示，避免 HTML 压缩空格导致拥挤） ──
+    map_rows = []
     for r in range(5):
         row_ch = []
         for c in range(5):
@@ -184,7 +185,11 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
                         row_ch.append("🟫")
                     else:
                         row_ch.append("🔒")
-        lines.append(" ".join(row_ch))
+        map_rows.append("   ".join(row_ch))
+
+    lines.append("<pre>")
+    lines.append("\n\n".join(map_rows))
+    lines.append("</pre>")
 
     lines.append("")
     lines.append("图例: 🧱已建  🟫可建  🔒未解锁  🌿空地")
@@ -198,8 +203,8 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
             built_items.append(f"{info['emoji']}{info['name']} Lv.{lv}")
     lines.append("🏗️ <b>已建建筑</b>")
     if built_items:
-        for i in range(0, len(built_items), 2):
-            lines.append("  • " + "  |  ".join(built_items[i:i + 2]))
+        for item in built_items:
+            lines.append(f"  • {item}")
     else:
         lines.append("  • 暂无")
 
