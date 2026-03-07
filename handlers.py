@@ -1440,16 +1440,26 @@ async def cmd_clan_info(msg: types.Message):
         return
 
     members = clan.get("members", [])
-    member_lines = []
+    leader_uid = str(clan.get("leader", ""))
     total_trophies = 0
+    member_entries = []
     for m_uid in members:
         mp = await get_player(m_uid)
-        if mp:
-            total_trophies += mp["trophies"]
-            role = "👑 首领" if m_uid == clan.get("leader") else "👤 成员"
-            member_lines.append(
-                f"  {role} {safe_html(mp['name'])} | 🏆 {mp['trophies']}"
-            )
+        if not mp:
+            continue
+        total_trophies += mp["trophies"]
+        member_entries.append({
+            "uid": str(m_uid),
+            "name": mp["name"],
+            "trophies": mp["trophies"],
+        })
+
+    # 首领固定第一，其余成员按奖杯降序
+    member_entries.sort(key=lambda x: (0 if x["uid"] == leader_uid else 1, -x["trophies"], x["name"]))
+    member_lines = [
+        f"  {'👑 首领' if e['uid'] == leader_uid else '👤 成员'} {safe_html(e['name'])} | 🏆 {e['trophies']}"
+        for e in member_entries
+    ]
 
     text = (
         f"🏯 <b>{safe_html(clan['name'])}</b>\n"
@@ -2796,16 +2806,26 @@ async def cb_village_panel(cb: types.CallbackQuery):
             return
 
         members = clan.get("members", [])
+        leader_uid = str(clan.get("leader", ""))
         total_trophies = 0
-        member_lines = []
+        member_entries = []
         for m_uid in members:
             mp = await get_player(m_uid)
-            if mp:
-                total_trophies += mp["trophies"]
-                role = "👑" if m_uid == clan.get("leader") else "👤"
-                member_lines.append(
-                    f"  {role} {safe_html(mp['name'])}  |  🏆 {mp['trophies']}"
-                )
+            if not mp:
+                continue
+            total_trophies += mp["trophies"]
+            member_entries.append({
+                "uid": str(m_uid),
+                "name": mp["name"],
+                "trophies": mp["trophies"],
+            })
+
+        # 首领固定第一，其余成员按奖杯降序
+        member_entries.sort(key=lambda x: (0 if x["uid"] == leader_uid else 1, -x["trophies"], x["name"]))
+        member_lines = [
+            f"  {'👑' if e['uid'] == leader_uid else '👤'} {safe_html(e['name'])}  |  🏆 {e['trophies']}"
+            for e in member_entries
+        ]
 
         avg_trophy = int(total_trophies / len(members)) if members else 0
         text = (
