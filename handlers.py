@@ -150,6 +150,32 @@ def _village_size_by_th(th_lv: int) -> int:
     return 5
 
 
+RESOURCE_BUILDING_GROUPS: dict[str, dict[str, str]] = {
+    "gold_mine": {"title": "⛏️ 金矿", "emoji": "⛏️"},
+    "elixir_collector": {"title": "💧 圣水收集器", "emoji": "💧"},
+    "gold_storage": {"title": "🏦 金币仓库", "emoji": "🏦"},
+    "elixir_storage": {"title": "🧪 圣水仓库", "emoji": "🧪"},
+}
+
+
+def _series_ids(base_bid: str) -> list[str]:
+    ids = [bid for bid in BUILDINGS if bid == base_bid or bid.startswith(f"{base_bid}_")]
+    ids.sort(key=lambda x: (0 if x == base_bid else int(x.rsplit("_", 1)[1])))
+    return ids
+
+
+def _group_status(base_bid: str, bld: dict, th_lv: int) -> tuple[int, int]:
+    built = 0
+    unlocked = 0
+    for bid in _series_ids(base_bid):
+        info = BUILDINGS[bid]
+        if th_lv >= info["th_required"]:
+            unlocked += 1
+        if bld.get(bid, 0) > 0:
+            built += 1
+    return built, unlocked
+
+
 def _has_enough_resource(current: float, required: float) -> bool:
     return float(current) + 1e-9 >= float(required)
 
@@ -231,19 +257,31 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
                         row_ch.append("🟫")
                     else:
                         row_ch.append("🔒")
-        map_rows.append("   ".join(row_ch))
+        map_rows.append("  ".join(row_ch))
 
     lines.append("<pre>")
-    lines.append("\n\n".join(map_rows))
+    lines.append("\n".join(map_rows))
     lines.append("</pre>")
 
     lines.append("")
     lines.append("图例: 🧱已建  🟫可建  🔒未解锁  🌿空地")
     lines.append("")
 
-    # ── 图例：已建造 ──
+    # ── 图例：已建造（资源类分组展示） ──
+    grouped_ids = {
+        bid
+        for base_bid in RESOURCE_BUILDING_GROUPS
+        for bid in _series_ids(base_bid)
+    }
     built_items = []
+    for base_bid, meta in RESOURCE_BUILDING_GROUPS.items():
+        levels = [bld.get(bid, 0) for bid in _series_ids(base_bid) if bld.get(bid, 0) > 0]
+        if levels:
+            lv_text = " / ".join([f"Lv.{lv}" for lv in levels])
+            built_items.append(f"{meta['title']} ×{len(levels)}（{lv_text}）")
     for bid, info in BUILDINGS.items():
+        if bid in grouped_ids:
+            continue
         lv = bld.get(bid, 0)
         if lv > 0:
             built_items.append(f"{info['emoji']}{info['name']} Lv.{lv}")
@@ -254,10 +292,28 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     else:
         lines.append("  • 暂无")
 
-    # ── 图例：可建造 / 未解锁 ──
+    # ── 图例：可建造 / 未解锁（资源类分组展示） ──
     buildable = []
     locked = []
+    for base_bid, meta in RESOURCE_BUILDING_GROUPS.items():
+        buildable_cnt = 0
+        next_lock_req = None
+        for bid in _series_ids(base_bid):
+            if bld.get(bid, 0) > 0:
+                continue
+            req = BUILDINGS[bid]["th_required"]
+            if th_lv >= req:
+                buildable_cnt += 1
+            else:
+                next_lock_req = req if next_lock_req is None else min(next_lock_req, req)
+        if buildable_cnt > 0:
+            buildable.append(f"{meta['title']}（可建 {buildable_cnt} 座）")
+        if next_lock_req is not None:
+            locked.append(f"{meta['title']}(Lv.{next_lock_req})")
+
     for bid, info in BUILDINGS.items():
+        if bid in grouped_ids:
+            continue
         if bld.get(bid, 0) == 0:
             req = info["th_required"]
             if th_lv >= req:
@@ -665,7 +721,23 @@ async def cmd_shop(msg: types.Message):
     th_lv = bld.get("town_hall", 1)
 
     lines = ["🏪 <b>建筑商店</b>\n"]
+    grouped_ids = {
+        bid
+        for base_bid in RESOURCE_BUILDING_GROUPS
+        for bid in _series_ids(base_bid)
+    }
+
+    lines.append("📦 <b>资源建筑（分组）</b>")
+    for base_bid, meta in RESOURCE_BUILDING_GROUPS.items():
+        built, unlocked = _group_status(base_bid, bld, th_lv)
+        total = len(_series_ids(base_bid))
+        lines.append(f"{meta['title']}：已建 {built}/{total}，已解锁 {unlocked}/{total}")
+
+    lines.append("")
+    lines.append("🏗️ <b>其他建筑</b>")
     for bid, info in BUILDINGS.items():
+        if bid in grouped_ids:
+            continue
         cur_lv = bld.get(bid, 0)
         req = info["th_required"]
         if bid == "town_hall":
@@ -1960,7 +2032,27 @@ async def cb_village_panel(cb: types.CallbackQuery):
         th_lv = bld.get("town_hall", 1)
         lines = ["🏪 <b>建筑商店</b>\n"]
         action_buttons: list[InlineKeyboardButton] = []
+        grouped_ids = {
+            bid
+            for base_bid in RESOURCE_BUILDING_GROUPS
+            for bid in _series_ids(base_bid)
+        }
+
+        lines.append("📦 <b>资源建筑（分组）</b>")
+        for base_bid, meta in RESOURCE_BUILDING_GROUPS.items():
+            built, unlocked = _group_status(base_bid, bld, th_lv)
+            total = len(_series_ids(base_bid))
+            lines.append(f"{meta['title']}：已建 {built}/{total}，已解锁 {unlocked}/{total}")
+            action_buttons.append(InlineKeyboardButton(
+                text=f"{meta['title']}（{built}/{total}）",
+                callback_data=f"vm:grp:{base_bid}:{uid}",
+            ))
+        lines.append("")
+        lines.append("🏗️ <b>其他建筑</b>")
+
         for bid, info in BUILDINGS.items():
+            if bid in grouped_ids:
+                continue
             cur_lv = bld.get(bid, 0)
             req = info["th_required"]
             max_lv = info["max_level"] if bid == "town_hall" else min(th_lv + 1, info["max_level"])
@@ -2024,6 +2116,49 @@ async def cb_village_panel(cb: types.CallbackQuery):
             InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}"),
         ])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        try:
+            await cb.message.edit_text("\n".join(lines), reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "grp":
+        base_bid = parts[2]
+        owner_uid = parts[3]
+        if base_bid not in RESOURCE_BUILDING_GROUPS:
+            await cb.answer("未知分组", show_alert=True)
+            return
+        bld = p["buildings"]
+        th_lv = bld.get("town_hall", 1)
+        meta = RESOURCE_BUILDING_GROUPS[base_bid]
+        lines = [f"{meta['emoji']} <b>{meta['title']}</b>\n"]
+        btns: list[list[InlineKeyboardButton]] = []
+
+        for bid in _series_ids(base_bid):
+            info = BUILDINGS[bid]
+            req = info["th_required"]
+            lv = bld.get(bid, 0)
+            max_lv = min(th_lv + 1, info["max_level"])
+            if th_lv < req:
+                lines.append(f"🔒 {info['name']}：大本营 Lv.{req} 解锁")
+            elif lv == 0:
+                cost = info["costs"][0]
+                res_icon = "💰" if info["resource"] == "gold" else "💧"
+                lines.append(f"{info['emoji']} {info['name']}：未建造（建造 {res_icon}{fmt_num(cost)}）")
+            elif lv >= max_lv:
+                lines.append(f"{info['emoji']} {info['name']}：Lv.{lv} ✅")
+            else:
+                cost = info["costs"][lv]
+                res_icon = "💰" if info["resource"] == "gold" else "💧"
+                lines.append(f"{info['emoji']} {info['name']}：Lv.{lv} → Lv.{lv + 1}（{res_icon}{fmt_num(cost)}）")
+
+            btns.append([InlineKeyboardButton(
+                text=f"{info['emoji']} {info['name']}",
+                callback_data=f"vm:bld:{bid}:{uid}",
+            )])
+
+        btns.append([InlineKeyboardButton(text="◀️ 返回商店", callback_data=f"vm:shop:{uid}")])
+        kb = InlineKeyboardMarkup(inline_keyboard=btns)
         try:
             await cb.message.edit_text("\n".join(lines), reply_markup=kb)
         except Exception:
