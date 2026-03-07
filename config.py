@@ -318,7 +318,7 @@ TROOPS = {
 
 # ===== PvP 常量 =====
 SHIELD_DURATION = {3: 8 * 3600, 2: 4 * 3600, 1: 2 * 3600}
-LOOT_PERCENT = {3: 0.30, 2: 0.20, 1: 0.10, 0: 0.0}
+LOOT_PERCENT = {3: 0.60, 2: 0.40, 1: 0.20, 0: 0.10}
 # 掠夺权重：仓库更难抢，收集器/矿更容易被抢
 LOOT_STORAGE_FACTOR = 0.55
 LOOT_COLLECTOR_FACTOR = 1.35
