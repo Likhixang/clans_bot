@@ -28,6 +28,33 @@ def _to_int_str(raw) -> str:
         return str(_round_half_up(float(s or 0)))
 
 
+def _building_series_ids(base_bid: str) -> list[str]:
+    """同类建筑序列（如 gold_mine / gold_mine_2 / gold_mine_3）。"""
+    ids = [bid for bid in BUILDINGS if bid == base_bid or bid.startswith(f"{base_bid}_")]
+
+    def _sort_key(bid: str) -> tuple[int, str]:
+        if bid == base_bid:
+            return 1, bid
+        suffix = bid[len(base_bid) + 1:]
+        if suffix.isdigit():
+            return int(suffix), bid
+        return 9999, bid
+
+    return sorted(ids, key=_sort_key)
+
+
+def _sum_capacity_by_series(bld: dict, base_bid: str, default_main_lv: int = 1) -> float:
+    total = 0.0
+    for bid in _building_series_ids(base_bid):
+        if bid == base_bid:
+            lv = bld.get(bid, default_main_lv)
+        else:
+            lv = bld.get(bid, 0)
+        if lv > 0:
+            total += BUILDINGS[bid]["capacity"][lv - 1]
+    return total
+
+
 # ───────────────────── 玩家 ─────────────────────
 
 async def get_player(uid: str) -> dict | None:
@@ -122,16 +149,23 @@ async def collect_resources(uid: str, p: dict, until_ts: float | None = None) ->
         return 0, 0
 
     bld = p["buildings"]
-    gm = bld.get("gold_mine", 0)
-    ec = bld.get("elixir_collector", 0)
-    gs = bld.get("gold_storage", 1)
-    es = bld.get("elixir_storage", 1)
+    gold_prod_per_hour = 0.0
+    for bid in _building_series_ids("gold_mine"):
+        lv = bld.get(bid, 0)
+        if lv > 0:
+            gold_prod_per_hour += BUILDINGS[bid]["production"][lv - 1]
 
-    gold_prod = BUILDINGS["gold_mine"]["production"][gm - 1] * elapsed_h if gm else 0
-    elix_prod = BUILDINGS["elixir_collector"]["production"][ec - 1] * elapsed_h if ec else 0
+    elix_prod_per_hour = 0.0
+    for bid in _building_series_ids("elixir_collector"):
+        lv = bld.get(bid, 0)
+        if lv > 0:
+            elix_prod_per_hour += BUILDINGS[bid]["production"][lv - 1]
 
-    max_gold = BUILDINGS["gold_storage"]["capacity"][gs - 1]
-    max_elix = BUILDINGS["elixir_storage"]["capacity"][es - 1]
+    gold_prod = gold_prod_per_hour * elapsed_h
+    elix_prod = elix_prod_per_hour * elapsed_h
+
+    max_gold = get_max_gold(p)
+    max_elix = get_max_elixir(p)
 
     new_gold = min(p["gold"] + gold_prod, max_gold)
     new_elix = min(p["elixir"] + elix_prod, max_elix)
@@ -241,13 +275,11 @@ async def incr_field(uid: str, field: str, amount: int = 1):
 # ───────────────────── 容量 / 上限 ─────────────────────
 
 def get_max_gold(p: dict) -> float:
-    lv = p["buildings"].get("gold_storage", 1)
-    return BUILDINGS["gold_storage"]["capacity"][lv - 1]
+    return _sum_capacity_by_series(p["buildings"], "gold_storage", default_main_lv=1)
 
 
 def get_max_elixir(p: dict) -> float:
-    lv = p["buildings"].get("elixir_storage", 1)
-    return BUILDINGS["elixir_storage"]["capacity"][lv - 1]
+    return _sum_capacity_by_series(p["buildings"], "elixir_storage", default_main_lv=1)
 
 
 def get_army_capacity(p: dict) -> int:

@@ -95,18 +95,59 @@ router.callback_query.middleware(MaintenanceMiddleware())
 
 # ───────────────────── 村庄可视化 ─────────────────────
 
-# 5×5 村庄布局：外→内 = 城墙 → 防御/兵营 → 资源 → 大本营
-VILLAGE_POS = {
-    (1, 1): "cannon",          # 防御层 左
-    (1, 2): "barracks",        # 兵营 中
-    (1, 3): "archer_tower",    # 防御层 右
-    (2, 1): "gold_mine",       # 资源层
-    (2, 2): "town_hall",       # ★ 核心
-    (2, 3): "elixir_collector",
-    (3, 1): "gold_storage",    # 仓库层
-    (3, 2): "elixir_storage",
-    (3, 3): None,              # 草地
+# 基地地块解锁：TH 1-3 => 5x5，TH 4-6 => 7x7，TH 7+ => 9x9
+VILLAGE_LAYOUT_BY_SIZE = {
+    5: {
+        (1, 1): "cannon",
+        (1, 2): "barracks",
+        (1, 3): "archer_tower",
+        (2, 1): "gold_mine",
+        (2, 2): "town_hall",
+        (2, 3): "elixir_collector",
+        (3, 1): "gold_storage",
+        (3, 2): "elixir_storage",
+    },
+    7: {
+        (2, 2): "cannon",
+        (2, 3): "barracks",
+        (2, 4): "archer_tower",
+        (3, 2): "gold_mine",
+        (3, 3): "town_hall",
+        (3, 4): "elixir_collector",
+        (4, 2): "gold_storage",
+        (4, 3): "gold_mine_2",
+        (4, 4): "elixir_storage",
+        (3, 1): "elixir_collector_2",
+        (5, 2): "gold_storage_2",
+        (5, 4): "elixir_storage_2",
+    },
+    9: {
+        (3, 3): "cannon",
+        (2, 4): "barracks",
+        (3, 5): "archer_tower",
+        (4, 3): "gold_mine",
+        (4, 4): "town_hall",
+        (4, 5): "elixir_collector",
+        (5, 3): "gold_storage",
+        (5, 4): "gold_mine_2",
+        (5, 5): "elixir_storage",
+        (4, 2): "elixir_collector_2",
+        (6, 3): "gold_storage_2",
+        (6, 5): "elixir_storage_2",
+        (3, 4): "gold_mine_3",
+        (4, 6): "elixir_collector_3",
+        (6, 4): "gold_storage_3",
+        (5, 6): "elixir_storage_3",
+    },
 }
+
+
+def _village_size_by_th(th_lv: int) -> int:
+    if th_lv >= 7:
+        return 9
+    if th_lv >= 4:
+        return 7
+    return 5
 
 
 def _has_enough_resource(current: float, required: float) -> bool:
@@ -152,6 +193,9 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
         lines.append(f"🏯 所属部落: <b>{safe_html(clan_name)}</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("🗺️ <b>基地俯瞰</b>")
+    map_size = _village_size_by_th(th_lv)
+    next_expand = "已解锁最大地块" if map_size == 9 else ("Lv.4 解锁 7x7" if map_size == 5 else "Lv.7 解锁 9x9")
+    lines.append(f"📐 地块: {map_size}x{map_size}（下级扩建: {next_expand}）")
 
     # ── 城墙外观 ──
     wall_lv = bld.get("wall", 0)
@@ -163,15 +207,17 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     else:
         wall_ch = "🌲"
 
-    # ── 渲染 5×5 网格（预格式化显示，避免 HTML 压缩空格导致拥挤） ──
+    layout = VILLAGE_LAYOUT_BY_SIZE[map_size]
+
+    # ── 渲染网格（预格式化显示，避免 HTML 压缩空格导致拥挤） ──
     map_rows = []
-    for r in range(5):
+    for r in range(map_size):
         row_ch = []
-        for c in range(5):
-            if r == 0 or r == 4 or c == 0 or c == 4:
+        for c in range(map_size):
+            if r == 0 or r == map_size - 1 or c == 0 or c == map_size - 1:
                 row_ch.append(wall_ch)
             else:
-                bid = VILLAGE_POS.get((r, c))
+                bid = layout.get((r, c))
                 if bid is None:
                     row_ch.append("🌿")
                 elif bid == "town_hall":
@@ -2144,40 +2190,38 @@ async def cb_village_panel(cb: types.CallbackQuery):
 
     elif action == "rates":
         bld = p["buildings"]
-        gm_lv = bld.get("gold_mine", 0)
-        ec_lv = bld.get("elixir_collector", 0)
-        gm_info = BUILDINGS["gold_mine"]
-        ec_info = BUILDINGS["elixir_collector"]
+        mine_ids = [bid for bid in BUILDINGS if bid == "gold_mine" or bid.startswith("gold_mine_")]
+        collector_ids = [bid for bid in BUILDINGS if bid == "elixir_collector" or bid.startswith("elixir_collector_")]
+        mine_ids.sort(key=lambda x: (0 if x == "gold_mine" else int(x.rsplit("_", 1)[1])))
+        collector_ids.sort(key=lambda x: (0 if x == "elixir_collector" else int(x.rsplit("_", 1)[1])))
 
         lines = ["📊 <b>资源产量速率</b>\n"]
-        cur_gm = f"Lv.{gm_lv} → {fmt_num(gm_info['production'][gm_lv - 1])}/小时" if gm_lv else "未建造"
-        lines.append(f"⛏️ 金矿（当前 {cur_gm}）")
-        parts_g = []
-        for i in range(gm_info["max_level"]):
-            lv = i + 1
-            prod = gm_info["production"][i]
-            if lv == gm_lv:
-                parts_g.append(f"Lv.{lv}: ✅{fmt_num(prod)}/h")
-            else:
-                parts_g.append(f"Lv.{lv}: {fmt_num(prod)}/h")
-        lines.append("  " + " | ".join(parts_g[:5]))
-        if len(parts_g) > 5:
-            lines.append("  " + " | ".join(parts_g[5:]))
+        total_gold_hour = 0
+        for bid in mine_ids:
+            lv = bld.get(bid, 0)
+            if lv <= 0:
+                continue
+            info = BUILDINGS[bid]
+            prod = info["production"][lv - 1]
+            total_gold_hour += prod
+            lines.append(f"{info['emoji']} {info['name']} Lv.{lv} → {fmt_num(prod)}/小时")
+        if total_gold_hour <= 0:
+            lines.append("⛏️ 金矿：暂无已建造")
+        lines.append(f"💰 金币总产量：{fmt_num(total_gold_hour)}/小时")
 
         lines.append("")
-        cur_ec = f"Lv.{ec_lv} → {fmt_num(ec_info['production'][ec_lv - 1])}/小时" if ec_lv else "未建造"
-        lines.append(f"💧 圣水收集器（当前 {cur_ec}）")
-        parts_e = []
-        for i in range(ec_info["max_level"]):
-            lv = i + 1
-            prod = ec_info["production"][i]
-            if lv == ec_lv:
-                parts_e.append(f"Lv.{lv}: ✅{fmt_num(prod)}/h")
-            else:
-                parts_e.append(f"Lv.{lv}: {fmt_num(prod)}/h")
-        lines.append("  " + " | ".join(parts_e[:5]))
-        if len(parts_e) > 5:
-            lines.append("  " + " | ".join(parts_e[5:]))
+        total_elixir_hour = 0
+        for bid in collector_ids:
+            lv = bld.get(bid, 0)
+            if lv <= 0:
+                continue
+            info = BUILDINGS[bid]
+            prod = info["production"][lv - 1]
+            total_elixir_hour += prod
+            lines.append(f"{info['emoji']} {info['name']} Lv.{lv} → {fmt_num(prod)}/小时")
+        if total_elixir_hour <= 0:
+            lines.append("💧 圣水收集器：暂无已建造")
+        lines.append(f"💧 圣水总产量：{fmt_num(total_elixir_hour)}/小时")
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ 返回商店", callback_data=f"vm:shop:{uid}")]
