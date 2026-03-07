@@ -245,7 +245,7 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
             else:
                 bid = layout.get((r, c))
                 if bid is None:
-                    row_ch.append("🌿")
+                    row_ch.append("🟫")
                 elif bid == "town_hall":
                     row_ch.append("🏰")
                 else:
@@ -264,7 +264,7 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     lines.append("</pre>")
 
     lines.append("")
-    lines.append("图例: 🧱已建  🟫可建  🔒未解锁  🌿空地")
+    lines.append("图例: 🧱已建  🟫可建/空地  🔒未解锁")
     lines.append("")
 
     # ── 图例：已建造（资源类分组展示） ──
