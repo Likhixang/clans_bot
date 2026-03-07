@@ -337,14 +337,13 @@ def preview_attack(attacker: dict, defender: dict,
 
 
 def recommend_troops(attacker: dict, defender: dict) -> dict:
-    """根据对手防御推荐最优配兵方案"""
+    """智能配兵：优先使用尽量少的兵达到稳定胜利（预览最低1星）。"""
     available = {tid: cnt for tid, cnt in attacker["troops"].items() if cnt > 0}
     if not available:
         return {}
 
     bld = defender["buildings"]
     wall_lv = bld.get("wall", 0)
-    cannon_lv = bld.get("cannon", 0)
     tower_lv = bld.get("archer_tower", 0)
     has_wall = wall_lv > 0
     has_tower = tower_lv > 0
@@ -352,57 +351,64 @@ def recommend_troops(attacker: dict, defender: dict) -> dict:
     # 优先级策略:
     # 1) 有高城墙 → 空军优先(dragon > balloon) 或 炸弹人
     # 2) 有箭塔(对空) → 地面重型(giant > wizard) + 炸弹人破墙
-    # 3) 资源多 → 掺入哥布林
-    # 4) 通用填充: wizard > archer > barbarian
+    # 3) 资源多 → 掺入少量哥布林
+    # 4) 通用补充: wizard > archer > barbarian
+    #
+    # 执行方式：按优先级逐个加兵，每加一步就做一次预览。
+    # 达到“最低1星”即停止，避免无脑全派。
 
-    result = {}
-    capacity = sum(
-        TROOPS[tid]["housing"] * cnt for tid, cnt in available.items()
-    )  # 全部可用住房
-    used_housing = 0
+    result: dict[str, int] = {}
 
-    def _add(tid, count):
-        nonlocal used_housing
+    def _add_one(tid: str) -> bool:
         if tid not in available or available[tid] <= 0:
-            return 0
-        actual = min(count, available[tid])
-        if actual <= 0:
-            return 0
-        result[tid] = result.get(tid, 0) + actual
-        available[tid] -= actual
-        used_housing += actual * TROOPS[tid]["housing"]
-        return actual
+            return False
+        result[tid] = result.get(tid, 0) + 1
+        available[tid] -= 1
+        return True
 
     gold = defender.get("gold", 0)
     elixir = defender.get("elixir", 0)
     total_res = gold + elixir
 
+    plan: list[str] = []
+
     if has_wall and not has_tower:
-        # 有城墙没箭塔 → 空军最佳
-        _add("dragon", available.get("dragon", 0))
-        _add("balloon", available.get("balloon", 0))
-        _add("wizard", available.get("wizard", 0))
+        for tid in ("dragon", "balloon", "wizard"):
+            cnt = available.get(tid, 0)
+            if cnt > 0:
+                plan.extend([tid] * cnt)
         if total_res > 5000:
-            _add("goblin", min(available.get("goblin", 0), 5))
+            plan.extend(["goblin"] * min(available.get("goblin", 0), 5))
     elif has_wall and has_tower:
-        # 有墙有塔 → 炸弹人破墙 + 地面重型
-        _add("wall_breaker", min(available.get("wall_breaker", 0), 5))
-        _add("giant", available.get("giant", 0))
-        _add("wizard", available.get("wizard", 0))
-        _add("dragon", available.get("dragon", 0))
+        # 有墙有塔 -> 炸弹人破墙 + 地面重型
+        plan.extend(["wall_breaker"] * min(available.get("wall_breaker", 0), 5))
+        for tid in ("giant", "wizard", "dragon"):
+            cnt = available.get(tid, 0)
+            if cnt > 0:
+                plan.extend([tid] * cnt)
         if total_res > 5000:
-            _add("goblin", min(available.get("goblin", 0), 5))
+            plan.extend(["goblin"] * min(available.get("goblin", 0), 5))
     else:
-        # 无墙 → 高攻优先
-        _add("dragon", available.get("dragon", 0))
-        _add("wizard", available.get("wizard", 0))
-        _add("balloon", available.get("balloon", 0))
-        _add("giant", available.get("giant", 0))
+        # 无墙 -> 高攻优先
+        for tid in ("dragon", "wizard", "balloon", "giant"):
+            cnt = available.get(tid, 0)
+            if cnt > 0:
+                plan.extend([tid] * cnt)
         if total_res > 5000:
-            _add("goblin", min(available.get("goblin", 0), 5))
+            plan.extend(["goblin"] * min(available.get("goblin", 0), 5))
 
-    # 剩余空间填充
+    # 最后通用补充（轻单位）
     for tid in ("archer", "barbarian", "goblin"):
-        _add(tid, available.get(tid, 0))
+        cnt = available.get(tid, 0)
+        if cnt > 0:
+            plan.extend([tid] * cnt)
 
-    return {tid: cnt for tid, cnt in result.items() if cnt > 0}
+    for tid in plan:
+        if not _add_one(tid):
+            continue
+        pv = preview_attack(attacker, defender, result)
+        if pv["stars_min"] >= 1:
+            return {t: c for t, c in result.items() if c > 0}
+
+    # 兜底：如果稳定1星做不到，返回当前最强组合（可能接近全派）
+    return {t: c for t, c in result.items() if c > 0}
