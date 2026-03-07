@@ -552,6 +552,7 @@ async def cmd_help(msg: types.Message):
         "/clan_me - 查看个人信息\n"
         "/clan_collect - 收集资源\n\n"
         "💱 <b>兑换</b>\n"
+        "/clan_auto [金币/圣水] - 购买自动收集（6小时）\n"
         "/clan_buy [金币/圣水] [积分] - 积分1:1购买资源\n"
         "/clan_swap [金币/圣水] [数量] - 金币/圣水互换（损耗2%）\n\n"
         "/clan_sell [金币/圣水] [数量] - 资源换积分（每100=1积分，另收2%资源税）\n\n"
@@ -619,6 +620,45 @@ async def cmd_collect(msg: types.Message):
 
 
 # ───────────────────── /buy /swap ─────────────────────
+
+@router.message(Command("clan_auto"))
+async def cmd_auto(msg: types.Message):
+    if not _check(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.reply("用法: /clan_auto [金币/圣水]")
+        return
+
+    pay_alias = args[1].strip().lower()
+    pay_map = {"金币": "gold", "圣水": "elixir"}
+    pay_res = pay_map.get(pay_alias)
+    if not pay_res:
+        await msg.reply("❌ 资源类型: 金币 或 圣水")
+        return
+
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    await _maybe_auto_collect(uid, p)
+
+    pay_name = "金币" if pay_res == "gold" else "圣水"
+    if not _has_enough_resource(p[pay_res], AUTO_COLLECT_COST):
+        await msg.reply(f"❌ {pay_name}不足，需 {AUTO_COLLECT_COST}")
+        return
+
+    if pay_res == "gold":
+        await add_gold(uid, -AUTO_COLLECT_COST)
+    else:
+        await add_elixir(uid, -AUTO_COLLECT_COST)
+    p[pay_res] -= AUTO_COLLECT_COST
+    until = time.time() + AUTO_COLLECT_DURATION
+    await set_field(uid, "auto_collect_until", until)
+    p["auto_collect_until"] = until
+    await msg.reply(
+        f"✅ 已消耗 {AUTO_COLLECT_COST}{'💰' if pay_res == 'gold' else '💧'} 开启自动收集 6 小时\n"
+        f"{_auto_collect_text(p)}"
+    )
+
 
 @router.message(Command("clan_buy"))
 async def cmd_buy(msg: types.Message):
