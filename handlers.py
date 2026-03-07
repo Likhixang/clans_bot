@@ -350,6 +350,17 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     lines.append(
         f"💧 圣水 {fmt_num(p['elixir'])}/{fmt_num(elixir_max)}  [{_bar(p['elixir'], elixir_max)}]"
     )
+    gold_rate = 0
+    for bid in _series_ids("gold_mine"):
+        lv = bld.get(bid, 0)
+        if lv > 0:
+            gold_rate += BUILDINGS[bid]["production"][lv - 1]
+    elixir_rate = 0
+    for bid in _series_ids("elixir_collector"):
+        lv = bld.get(bid, 0)
+        if lv > 0:
+            elixir_rate += BUILDINGS[bid]["production"][lv - 1]
+    lines.append(f"📈 资源产量  💰 {fmt_num(gold_rate)}/h  |  💧 {fmt_num(elixir_rate)}/h")
     lines.append(f"🪙 积分 {fmt_num(p['points'])}")
     lines.append(
         f"🏆 奖杯 {p['trophies']}  |  ⚔️ 战绩 {p['attack_wins']}胜{p['attack_losses']}负  |  🛡️ 防御 {fmt_num(get_defense_power(p))}"
