@@ -2151,10 +2151,6 @@ async def cb_village_panel(cb: types.CallbackQuery):
             ))
         lines.append("")
         lines.append("🏗️ <b>其他建筑</b>")
-        action_buttons.append(InlineKeyboardButton(
-            text="📊 资源产量速率",
-            callback_data=f"vm:rates:{uid}",
-        ))
 
         for bid, info in BUILDINGS.items():
             if bid in grouped_ids:
@@ -2430,48 +2426,7 @@ async def cb_village_panel(cb: types.CallbackQuery):
         await cb.answer(f"✅ 建造完成")
 
     elif action == "rates":
-        bld = p["buildings"]
-        mine_ids = [bid for bid in BUILDINGS if bid == "gold_mine" or bid.startswith("gold_mine_")]
-        collector_ids = [bid for bid in BUILDINGS if bid == "elixir_collector" or bid.startswith("elixir_collector_")]
-        mine_ids.sort(key=lambda x: (0 if x == "gold_mine" else int(x.rsplit("_", 1)[1])))
-        collector_ids.sort(key=lambda x: (0 if x == "elixir_collector" else int(x.rsplit("_", 1)[1])))
-
-        lines = ["📊 <b>资源产量速率</b>\n"]
-        total_gold_hour = 0
-        for bid in mine_ids:
-            lv = bld.get(bid, 0)
-            if lv <= 0:
-                continue
-            info = BUILDINGS[bid]
-            prod = info["production"][lv - 1]
-            total_gold_hour += prod
-            lines.append(f"{info['emoji']} {info['name']} Lv.{lv} → {fmt_num(prod)}/小时")
-        if total_gold_hour <= 0:
-            lines.append("⛏️ 金矿：暂无已建造")
-        lines.append(f"💰 金币总产量：{fmt_num(total_gold_hour)}/小时")
-
-        lines.append("")
-        total_elixir_hour = 0
-        for bid in collector_ids:
-            lv = bld.get(bid, 0)
-            if lv <= 0:
-                continue
-            info = BUILDINGS[bid]
-            prod = info["production"][lv - 1]
-            total_elixir_hour += prod
-            lines.append(f"{info['emoji']} {info['name']} Lv.{lv} → {fmt_num(prod)}/小时")
-        if total_elixir_hour <= 0:
-            lines.append("💧 圣水收集器：暂无已建造")
-        lines.append(f"💧 圣水总产量：{fmt_num(total_elixir_hour)}/小时")
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ 返回商店", callback_data=f"vm:shop:{uid}")]
-        ])
-        try:
-            await cb.message.edit_text("\n".join(lines), reply_markup=kb)
-        except Exception:
-            pass
-        await cb.answer()
+        await cb.answer("📊 资源产量已迁移到 ME 面板", show_alert=True)
 
     elif action == "army":
         troops = p["troops"]
