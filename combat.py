@@ -3,7 +3,7 @@ import time
 
 from config import (
     TROOPS, BUILDINGS, SHIELD_DURATION, LOOT_PERCENT,
-    TROPHY_ATTACK, TROPHY_DEFENSE,
+    TROPHY_ATTACK, TROPHY_DEFENSE, LOOT_STORAGE_FACTOR, LOOT_COLLECTOR_FACTOR,
 )
 from models import (
     get_player, get_all_player_uids, get_defense_power,
@@ -15,6 +15,84 @@ def _building_series_ids(base_bid: str) -> list[str]:
     ids = [bid for bid in BUILDINGS if bid == base_bid or bid.startswith(f"{base_bid}_")]
     ids.sort(key=lambda x: (0 if x == base_bid else int(x.rsplit("_", 1)[1])))
     return ids
+
+
+def _pending_collectable(defender: dict, resource: str, now_ts: float | None = None) -> int:
+    """计算当前矿/收集器里可被掠夺的未收取资源。"""
+    now = time.time() if now_ts is None else now_ts
+    elapsed_h = max(0.0, (now - float(defender.get("last_collect", 0))) / 3600.0)
+    if elapsed_h <= 0:
+        return 0
+
+    bld = defender["buildings"]
+    if resource == "gold":
+        series = "gold_mine"
+        current = float(defender.get("gold", 0))
+        cap = float(get_max_gold(defender))
+    else:
+        series = "elixir_collector"
+        current = float(defender.get("elixir", 0))
+        cap = float(get_max_elixir(defender))
+
+    prod_per_hour = 0.0
+    for bid in _building_series_ids(series):
+        lv = bld.get(bid, 0)
+        if lv > 0:
+            prod_per_hour += BUILDINGS[bid]["production"][lv - 1]
+
+    produced = prod_per_hour * elapsed_h
+    room = max(0.0, cap - current)
+    return max(0, round(min(produced, room)))
+
+
+def _calc_resource_loot(stored: int, pending: int, pct: float) -> tuple[int, int, int]:
+    """返回 (total_loot, storage_loot, collector_loot)。"""
+    storage_target = round(stored * pct * LOOT_STORAGE_FACTOR)
+    collector_target = round(pending * pct * LOOT_COLLECTOR_FACTOR)
+
+    available_total = max(0, stored) + max(0, pending)
+    total = min(available_total, max(0, storage_target) + max(0, collector_target))
+
+    collector_loot = min(max(0, pending), total, max(0, collector_target))
+    storage_loot = min(max(0, stored), total - collector_loot, max(0, storage_target))
+
+    remain = total - collector_loot - storage_loot
+    if remain > 0:
+        add_collector = min(max(0, pending) - collector_loot, remain)
+        collector_loot += add_collector
+        remain -= add_collector
+    if remain > 0:
+        add_storage = min(max(0, stored) - storage_loot, remain)
+        storage_loot += add_storage
+        remain -= add_storage
+
+    return collector_loot + storage_loot, storage_loot, collector_loot
+
+
+def _estimate_last_collect_after_loot(defender: dict, gold_collector_loot: int, elixir_collector_loot: int) -> float | None:
+    """按被抢走的收集器资源比例，估算新的 last_collect。"""
+    now = time.time()
+    last = float(defender.get("last_collect", 0))
+    elapsed_h = max(0.0, (now - last) / 3600.0)
+    if elapsed_h <= 0:
+        return None
+
+    pending_gold = _pending_collectable(defender, "gold", now_ts=now)
+    pending_elix = _pending_collectable(defender, "elixir", now_ts=now)
+
+    ratios = []
+    if pending_gold > 0:
+        remain = max(0.0, pending_gold - max(0, gold_collector_loot))
+        ratios.append(remain / pending_gold)
+    if pending_elix > 0:
+        remain = max(0.0, pending_elix - max(0, elixir_collector_loot))
+        ratios.append(remain / pending_elix)
+    if not ratios:
+        return None
+
+    kept_ratio = min(ratios)
+    new_elapsed_h = elapsed_h * kept_ratio
+    return now - new_elapsed_h * 3600.0
 
 
 async def find_target(attacker_uid: str, attacker: dict) -> tuple[str, dict] | None:
@@ -150,10 +228,16 @@ def calculate_attack(attacker: dict, defender: dict,
     else:
         stars = 0
 
-    # ── 战利品 ──
+    # ── 战利品：仓库 + 矿/收集器（仓库比例低，矿/收集器比例高） ──
     pct = LOOT_PERCENT[stars] * loot_multiplier
-    gold_loot = round(defender["gold"] * pct)
-    elixir_loot = round(defender["elixir"] * pct)
+    pending_gold = _pending_collectable(defender, "gold")
+    pending_elixir = _pending_collectable(defender, "elixir")
+    gold_loot, gold_storage_loot, gold_collector_loot = _calc_resource_loot(
+        int(defender["gold"]), pending_gold, pct
+    )
+    elixir_loot, elixir_storage_loot, elixir_collector_loot = _calc_resource_loot(
+        int(defender["elixir"]), pending_elixir, pct
+    )
 
     details_parts = []
     details_parts.append(f"⚔️ 攻击力 {int(final_atk)} vs 🛡️ 防御力 {int(final_def)}")
@@ -168,6 +252,10 @@ def calculate_attack(attacker: dict, defender: dict,
         "defense_power": int(final_def),
         "gold_loot": gold_loot,
         "elixir_loot": elixir_loot,
+        "gold_storage_loot": gold_storage_loot,
+        "gold_collector_loot": gold_collector_loot,
+        "elixir_storage_loot": elixir_storage_loot,
+        "elixir_collector_loot": elixir_collector_loot,
         "loot_multiplier": loot_multiplier,
         "details": "\n".join(details_parts),
         "troops_used": troops_used,
@@ -181,6 +269,10 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
     stars = result["stars"]
     gold_loot = result["gold_loot"]
     elixir_loot = result["elixir_loot"]
+    gold_storage_loot = int(result.get("gold_storage_loot", gold_loot))
+    gold_collector_loot = int(result.get("gold_collector_loot", 0))
+    elixir_storage_loot = int(result.get("elixir_storage_loot", elixir_loot))
+    elixir_collector_loot = int(result.get("elixir_collector_loot", 0))
 
     # 攻击方获得资源（不超过仓库上限）
     max_g = get_max_gold(attacker)
@@ -196,10 +288,14 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         await add_elixir(attacker_uid, actual_elix)
 
     # 防守方扣资源
-    if gold_loot > 0:
-        await add_gold(defender_uid, -gold_loot)
-    if elixir_loot > 0:
-        await add_elixir(defender_uid, -elixir_loot)
+    if gold_storage_loot > 0:
+        await add_gold(defender_uid, -gold_storage_loot)
+    if elixir_storage_loot > 0:
+        await add_elixir(defender_uid, -elixir_storage_loot)
+    if gold_collector_loot > 0 or elixir_collector_loot > 0:
+        new_last = _estimate_last_collect_after_loot(defender, gold_collector_loot, elixir_collector_loot)
+        if new_last is not None:
+            await set_field(defender_uid, "last_collect", new_last)
 
     # 攻击方部队处理
     if selected_troops is not None:
@@ -330,14 +426,18 @@ def preview_attack(attacker: dict, defender: dict,
 
     avg_stars = (stars_min + stars_max) / 2
     est_pct = LOOT_PERCENT.get(round(avg_stars), LOOT_PERCENT.get(stars_min, 0)) * loot_multiplier
+    pending_gold = _pending_collectable(defender, "gold")
+    pending_elixir = _pending_collectable(defender, "elixir")
+    gold_est, _, _ = _calc_resource_loot(int(defender["gold"]), pending_gold, est_pct)
+    elix_est, _, _ = _calc_resource_loot(int(defender["elixir"]), pending_elixir, est_pct)
 
     return {
         "stars_min": stars_min,
         "stars_max": stars_max,
         "power": base_attack,
         "defense": int(total_def),
-        "gold_est": round(defender["gold"] * est_pct),
-        "elixir_est": round(defender["elixir"] * est_pct),
+        "gold_est": gold_est,
+        "elixir_est": elix_est,
     }
 
 

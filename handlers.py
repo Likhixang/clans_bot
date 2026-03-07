@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import logging
+import re
 import time
 
 from aiogram import Router, types, F, BaseMiddleware
@@ -194,6 +195,59 @@ def _group_status(base_bid: str, bld: dict, th_lv: int) -> tuple[int, int]:
 
 def _has_enough_resource(current: float, required: float) -> bool:
     return float(current) + 1e-9 >= float(required)
+
+
+def _norm_building_token(s: str) -> str:
+    s = (s or "").strip().lower()
+    roman_map = {
+        "ⅰ": "1", "ⅱ": "2", "ⅲ": "3", "ⅳ": "4", "ⅴ": "5",
+        "Ⅰ": "1", "Ⅱ": "2", "Ⅲ": "3", "Ⅳ": "4", "Ⅴ": "5",
+    }
+    for k, v in roman_map.items():
+        s = s.replace(k, v)
+    s = s.replace("＿", "_").replace("-", "_").replace(" ", "")
+    return re.sub(r"[^a-z0-9_\u4e00-\u9fff]", "", s)
+
+
+def _resolve_building_id(raw: str) -> str | None:
+    token = (raw or "").strip()
+    if not token:
+        return None
+
+    direct = token.lower()
+    if direct in BUILDINGS:
+        return direct
+
+    alias = {
+        "th": "town_hall",
+        "townhall": "town_hall",
+        "大本": "town_hall",
+        "大本营": "town_hall",
+        "金仓": "gold_storage",
+        "圣水仓": "elixir_storage",
+        "收集器": "elixir_collector",
+        "金矿": "gold_mine",
+        "箭塔": "archer_tower",
+        "炮": "cannon",
+    }
+    if token in alias:
+        return alias[token]
+    if direct in alias:
+        return alias[direct]
+
+    norm = _norm_building_token(token)
+    if not norm:
+        return None
+
+    for bid, info in BUILDINGS.items():
+        candidates = {
+            _norm_building_token(bid),
+            _norm_building_token(info.get("name", "")),
+            _norm_building_token(f"{info.get('emoji', '')}{info.get('name', '')}"),
+        }
+        if norm in candidates:
+            return bid
+    return None
 
 
 def _auto_collect_text(p: dict) -> str:
@@ -860,12 +914,16 @@ async def cmd_upgrade(msg: types.Message):
         return
     args = msg.text.split()
     if len(args) < 2:
-        await msg.reply("请在 /clan_me → 🏪 商店 中选择建筑进行升级")
+        await msg.reply(
+            "用法: /clan_upgrade [建筑ID/建筑名]\n"
+            "示例: /clan_upgrade gold_mine_2 或 /clan_upgrade 金矿2\n"
+            "也可在 /clan_me → 🏪 商店 中点按钮升级"
+        )
         return
 
-    bid = args[1].lower()
-    if bid not in BUILDINGS:
-        await msg.reply(f"❌ 未知建筑: {bid}")
+    bid = _resolve_building_id(args[1])
+    if not bid:
+        await msg.reply(f"❌ 未知建筑: {args[1]}")
         return
 
     uid, name = _uid(msg), _name(msg)
