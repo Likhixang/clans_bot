@@ -32,6 +32,7 @@ COMMANDS = [
     BotCommand(command="clan_me", description="查看村庄面板"),
     BotCommand(command="clan_collect", description="收集资源"),
     BotCommand(command="clan_auto", description="购买自动收集"),
+    BotCommand(command="clan_shield", description="购买积分护盾"),
     BotCommand(command="clan_buy", description="积分购买资源"),
     BotCommand(command="clan_swap", description="金币圣水互换"),
     BotCommand(command="clan_sell", description="资源兑换积分"),

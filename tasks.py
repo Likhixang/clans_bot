@@ -21,13 +21,16 @@ from utils import mention, fmt_num, send
 
 logger = logging.getLogger(__name__)
 BOT_ATTACKER_NAMES = [
-    "🤖 狼群",
-    "🤖 熊群",
-    "🤖 野猪群",
-    "🤖 鹰群",
-    "🤖 蛇群",
-    "🤖 猴群",
+    "🐺 狼群",
+    "🐻 熊群",
+    "🐗 野猪群",
+    "🦅 鹰群",
+    "🐍 蛇群",
+    "🐒 猴群",
 ]
+BOT_MIN_INTERVAL_SECONDS = 5400  # 1.5h，每个玩家冷却
+BOT_GLOBAL_GAP_LIMIT_SECONDS = 5400  # 全局 1.5h 至少一次
+BOT_GLOBAL_LAST_KEY = "coc:bot_last_global_attack"
 
 DB_FILE = "backup.db"
 BACKUP_GLOB = "backup_*.db"
@@ -91,6 +94,7 @@ def _init_db(conn: sqlite3.Connection):
         shield_purchase_points REAL DEFAULT 0,
         shield_refund_eligible INTEGER DEFAULT 0,
         bot_last_attack REAL DEFAULT 0,
+        bot_next_attack_at REAL DEFAULT 0,
         created_at TEXT
     )''')
     cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
@@ -106,6 +110,8 @@ def _init_db(conn: sqlite3.Connection):
         c.execute("ALTER TABLE players ADD COLUMN shield_refund_eligible INTEGER DEFAULT 0")
     if "bot_last_attack" not in cols:
         c.execute("ALTER TABLE players ADD COLUMN bot_last_attack REAL DEFAULT 0")
+    if "bot_next_attack_at" not in cols:
+        c.execute("ALTER TABLE players ADD COLUMN bot_next_attack_at REAL DEFAULT 0")
     c.execute('''CREATE TABLE IF NOT EXISTS clans (
         clan_id TEXT PRIMARY KEY,
         name TEXT,
@@ -157,6 +163,7 @@ async def perform_backup() -> dict:
                 float(raw.get("shield_purchase_points", 0)),
                 int(raw.get("shield_refund_eligible", 0)),
                 float(raw.get("bot_last_attack", 0)),
+                float(raw.get("bot_next_attack_at", 0)),
                 raw.get("created_at", ""),
             ))
         # 战斗日志
@@ -191,7 +198,7 @@ async def perform_backup() -> dict:
         c = conn.cursor()
         c.execute("BEGIN TRANSACTION")
         c.executemany(
-            "INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             players_data,
         )
         c.executemany(
@@ -252,6 +259,8 @@ async def perform_restore() -> dict:
             + ("shield_refund_eligible" if "shield_refund_eligible" in has else "0 as shield_refund_eligible")
             + ","
             + ("bot_last_attack" if "bot_last_attack" in has else "0 as bot_last_attack")
+            + ","
+            + ("bot_next_attack_at" if "bot_next_attack_at" in has else "0 as bot_next_attack_at")
             + ",created_at FROM players"
         )
         players = c.fetchall()
@@ -292,7 +301,8 @@ async def perform_restore() -> dict:
             "shield_purchase_points": str(row[15]),
             "shield_refund_eligible": str(row[16]),
             "bot_last_attack": str(row[17]),
-            "created_at": row[18],
+            "bot_next_attack_at": str(row[18]),
+            "created_at": row[19],
         }
         pipe.hset(f"coc:{uid}", mapping=mapping)
         pipe.sadd("coc:all_players", uid)
@@ -424,19 +434,18 @@ def _bot_target_strength(p: dict) -> float:
     return 0.45 * th_score + 0.40 * def_score + 0.15 * trophy_score
 
 
-def _bot_should_attack_now(p: dict, elapsed: float) -> bool:
-    """随机触发进攻：每人 1.5h 内最多一次，超过后按强度概率触发。"""
-    min_interval = 5400  # 1.5h，硬冷却
-    if elapsed < min_interval:
-        return False
+def _initial_next_attack_at(uid: str, created_at: float) -> float:
+    """首次初始化：基于创建时间+uid稳定分槽，重启不会改变。"""
+    h = 0
+    for ch in uid:
+        h = (h * 131 + ord(ch)) % BOT_MIN_INTERVAL_SECONDS
+    base = max(0.0, float(created_at))
+    return base + float(h)
 
-    strength = _bot_target_strength(p)
-    overdue = elapsed - min_interval
-    # 过了 1.5h 后每分钟判定一次；越强基础概率更高，拖得越久概率缓慢上升（但不强制）
-    base = 0.04 + 0.14 * strength
-    overtime_boost = min(0.30, overdue / 3600 * 0.06)
-    chance = min(0.65, base + overtime_boost)
-    return random.random() < chance
+
+def _next_attack_at_after_attack() -> float:
+    """每次袭击后，下次最早 1.5h 后。"""
+    return time.time() + BOT_MIN_INTERVAL_SECONDS
 
 
 async def _notify_bot_attack(uid: str, p: dict, result: dict):
@@ -472,6 +481,7 @@ async def _execute_bot_attack(uid: str, p: dict):
     attacker = random.choice(BOT_ATTACKER_NAMES)
     if float(p.get("shield_until", 0)) > now:
         await set_field(uid, "bot_last_attack", now)
+        await set_field(uid, "bot_next_attack_at", _next_attack_at_after_attack())
         await add_battle_log(uid, {
             "type": "defense",
             "opponent": attacker,
@@ -505,6 +515,7 @@ async def _execute_bot_attack(uid: str, p: dict):
             await set_field(uid, "last_collect", new_last)
     # 动物袭击不提供护盾；护盾只来自玩家攻击或积分购买。
     await set_field(uid, "bot_last_attack", time.time())
+    await set_field(uid, "bot_next_attack_at", _next_attack_at_after_attack())
     await add_battle_log(uid, {
         "type": "defense",
         "opponent": attacker,
@@ -525,20 +536,52 @@ async def _execute_bot_attack(uid: str, p: dict):
 
 
 async def random_bot_attack_task():
-    """机器人按玩家独立随机进攻：每人 1.5h 内最多一次，超过后按强度概率触发。"""
+    """全局平滑袭击：1.5h 内至少 1 人被袭击，且单次只袭击 1 人。"""
     while True:
         try:
             now = time.time()
             uids = list(await get_all_player_uids())
             random.shuffle(uids)
+            weighted_candidates: list[tuple[str, dict, float]] = []
             for uid in uids:
                 p = await get_player(uid)
                 if not p:
                     continue
-                elapsed = now - float(p.get("bot_last_attack", 0))
-                if not _bot_should_attack_now(p, elapsed):
+                next_at = float(p.get("bot_next_attack_at", 0))
+                if next_at <= 0:
+                    # 首次初始化到稳定槽位，重启不会重算到新时间。
+                    created_at = float(p.get("created_at", 0))
+                    init_at = _initial_next_attack_at(uid, created_at)
+                    await set_field(uid, "bot_next_attack_at", init_at)
+                    p["bot_next_attack_at"] = init_at
                     continue
+                if now < next_at:
+                    continue
+                strength = _bot_target_strength(p)
+                overdue = max(0.0, now - next_at)
+                weight = (0.7 + 1.6 * strength) * (1.0 + min(1.0, overdue / 1800.0))
+                weighted_candidates.append((uid, p, max(0.01, weight)))
+
+            should_force = False
+            last_global_raw = await redis.get(BOT_GLOBAL_LAST_KEY)
+            last_global = float(last_global_raw or 0)
+            if last_global <= 0 or (now - last_global) >= BOT_GLOBAL_GAP_LIMIT_SECONDS:
+                should_force = True
+
+            chosen: tuple[str, dict] | None = None
+            if weighted_candidates:
+                if should_force:
+                    weighted_candidates.sort(key=lambda x: x[2], reverse=True)
+                    chosen = (weighted_candidates[0][0], weighted_candidates[0][1])
+                else:
+                    choices = [(uid, p) for uid, p, _ in weighted_candidates]
+                    weights = [w for _uid, _p, w in weighted_candidates]
+                    chosen = random.choices(choices, weights=weights, k=1)[0]
+
+            if chosen:
+                uid, p = chosen
                 await _execute_bot_attack(uid, p)
+                await redis.set(BOT_GLOBAL_LAST_KEY, str(time.time()))
         except Exception as e:
             logger.error(f"机器人随机进攻任务异常: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(random.randint(40, 80))

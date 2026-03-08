@@ -94,6 +94,8 @@ async def ensure_player(uid: str, name: str) -> dict:
             await redis.hset(f"coc:{uid}", "shield_refund_eligible", "0")
         if "bot_last_attack" not in data:
             await redis.hset(f"coc:{uid}", "bot_last_attack", "0")
+        if "bot_next_attack_at" not in data:
+            await redis.hset(f"coc:{uid}", "bot_next_attack_at", "0")
         p["points"] = await get_points(uid)
         if abs(float(data.get("points", 0)) - p["points"]) > 1e-9:
             await redis.hset(f"coc:{uid}", "points", str(p["points"]))
@@ -122,6 +124,7 @@ async def init_player(uid: str, name: str) -> dict:
         "shield_purchase_points": "0",
         "shield_refund_eligible": "0",
         "bot_last_attack": "0",
+        "bot_next_attack_at": "0",
         "created_at": str(now),
     }
     await redis.hset(f"coc:{uid}", mapping=data)
@@ -151,6 +154,8 @@ def _parse(data: dict) -> dict:
         "shield_purchase_points": round(float(data.get("shield_purchase_points", 0)), 2),
         "shield_refund_eligible": int(data.get("shield_refund_eligible", 0)),
         "bot_last_attack": float(data.get("bot_last_attack", 0)),
+        "bot_next_attack_at": float(data.get("bot_next_attack_at", 0)),
+        "created_at": float(data.get("created_at", 0)),
     }
 
 

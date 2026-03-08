@@ -597,6 +597,7 @@ async def cmd_help(msg: types.Message):
         "/clan_collect - 收集资源\n\n"
         "💱 <b>兑换</b>\n"
         "/clan_auto - 购买自动收集（6小时，300金币）\n"
+        "/clan_shield - 购买积分护盾（6小时，动态价格）\n"
         "/clan_buy [金币/圣水] [积分] - 积分1:1购买资源\n"
         "/clan_swap [金币/圣水] [数量] - 金币/圣水互换（损耗2%）\n\n"
         "/clan_sell [金币/圣水] [数量] - 资源换积分（每100=1积分，另收2%资源税）\n\n"
@@ -747,6 +748,42 @@ async def cmd_buy(msg: types.Message):
 
     await msg.reply(
         f"✅ 兑换成功：消耗 🪙 {fmt_num(points_cost)} → 获得 {'💰' if target == 'gold' else '💧'} {fmt_num(points_cost)}"
+    )
+
+
+@router.message(Command("clan_shield"))
+async def cmd_shield(msg: types.Message):
+    if not _check(msg):
+        return
+    args = msg.text.split()
+    if len(args) != 1:
+        await msg.reply("用法: /clan_shield")
+        return
+
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    await _maybe_auto_collect(uid, p)
+
+    if float(p.get("shield_until", 0)) > time.time():
+        await msg.reply("❌ 你当前有护盾生效中（含被攻击获得护盾），不能重复购买")
+        return
+
+    shield_cost = calc_points_shield_cost(p)
+    if not _has_enough_resource(p["points"], shield_cost):
+        await msg.reply(f"❌ 积分不足，需 {fmt_num(shield_cost)}")
+        return
+
+    until = time.time() + POINTS_SHIELD_DURATION
+    await add_points(uid, -shield_cost)
+    await set_field(uid, "shield_until", until)
+    await set_field(uid, "shield_source", "purchased")
+    await set_field(uid, "shield_purchase_points", shield_cost)
+    await set_field(uid, "shield_refund_eligible", 1)
+    remain = int(POINTS_SHIELD_DURATION)
+    h, m = divmod(remain // 60, 60)
+    await msg.reply(
+        f"✅ 已消耗 🪙{fmt_num(shield_cost)} 开启 {h}小时{m}分钟 积分护盾\n"
+        "⚠️ 主动打断并发起进攻时，可返还 50% 积分"
     )
 
 
