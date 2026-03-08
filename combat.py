@@ -155,51 +155,60 @@ def _estimate_last_collect_after_loot(defender: dict, gold_collector_loot: int, 
 
 
 async def find_target(attacker_uid: str, attacker: dict) -> tuple[str, dict] | None:
-    """随机找一个可攻击的对手（跳过同部落成员）"""
+    """随机找一个对手（优先无护盾，跳过同部落成员）"""
     all_uids = await get_all_player_uids()
     candidates = list(all_uids - {attacker_uid})
     random.shuffle(candidates)
 
     attacker_clan = attacker.get("clan_id", "")
     now = time.time()
+    shielded_fallback: list[tuple[str, dict]] = []
     for uid in candidates[:20]:
         p = await get_player(uid)
         if not p:
-            continue
-        if p["shield_until"] > now:
             continue
         if p["gold"] + p["elixir"] < 100:
             continue
         # 同部落保护
         if attacker_clan and p.get("clan_id") == attacker_clan:
             continue
+        if p["shield_until"] > now:
+            shielded_fallback.append((uid, p))
+            continue
         return uid, p
+    if shielded_fallback:
+        return random.choice(shielded_fallback)
     return None
 
 
 async def find_targets(attacker_uid: str, attacker: dict, count: int = 5) -> list[tuple[str, dict]]:
-    """返回最多 count 个候选目标（跳过同部落成员）"""
+    """返回最多 count 个候选目标（优先无护盾，跳过同部落成员）"""
     all_uids = await get_all_player_uids()
     candidates = list(all_uids - {attacker_uid})
     random.shuffle(candidates)
 
     attacker_clan = attacker.get("clan_id", "")
     now = time.time()
-    results = []
+    unshielded_results = []
+    shielded_results = []
     for uid in candidates[:50]:
         p = await get_player(uid)
         if not p:
-            continue
-        if p["shield_until"] > now:
             continue
         if p["gold"] + p["elixir"] < 100:
             continue
         if attacker_clan and p.get("clan_id") == attacker_clan:
             continue
-        results.append((uid, p))
-        if len(results) >= count:
+        if p["shield_until"] > now:
+            shielded_results.append((uid, p))
+        else:
+            unshielded_results.append((uid, p))
+        if len(unshielded_results) >= count:
             break
-    return results
+    if len(unshielded_results) >= count:
+        return unshielded_results[:count]
+    remaining = max(0, count - len(unshielded_results))
+    return unshielded_results + shielded_results[:remaining]
 
 
 def calculate_attack(attacker: dict, defender: dict,

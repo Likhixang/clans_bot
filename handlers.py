@@ -1470,7 +1470,7 @@ async def _do_attack(msg: types.Message, uid: str, name: str, p: dict):
 
     targets = await find_targets(uid, p, count=5)
     if not targets:
-        await msg.reply("🔍 没有找到可攻击的对手（所有人都有护盾或资源不足）")
+        await msg.reply("🔍 没有找到可攻击的对手（资源不足或同部落保护）")
         return
 
     lines = ["⚔️ <b>选择攻击目标</b>\n"]
@@ -1479,13 +1479,16 @@ async def _do_attack(msg: types.Message, uid: str, name: str, p: dict):
         th_lv = t_p["buildings"].get("town_hall", 1)
         defense = get_defense_power(t_p)
         total_res = t_p["gold"] + t_p["elixir"]
+        shield_on = float(t_p.get("shield_until", 0)) > time.time()
+        shield_tag = "🛡️护盾中" if shield_on else "✅可进攻"
         lines.append(
             f"• {safe_html(t_p['name'])} | 🏰Lv.{th_lv} | "
-            f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | "
+            f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | {shield_tag} | "
             f"💰{fmt_num(t_p['gold'])} 💧{fmt_num(t_p['elixir'])}"
         )
+        action_icon = "👁️" if shield_on else "⚔️"
         btns.append([InlineKeyboardButton(
-            text=f"⚔️ {t_p['name']} (🏰{th_lv} 💰💧{fmt_num(total_res)})",
+            text=f"{action_icon} {t_p['name']} (🏰{th_lv} 💰💧{fmt_num(total_res)})",
             callback_data=f"vm:atgt:{t_uid}:{uid}")])
     btns.append([InlineKeyboardButton(
         text="🔄 换一批", callback_data=f"vm:attack:{uid}")])
@@ -3483,13 +3486,16 @@ async def _do_attack_inline(cb: types.CallbackQuery, uid: str, name: str, p: dic
         th_lv = t_p["buildings"].get("town_hall", 1)
         defense = get_defense_power(t_p)
         total_res = t_p["gold"] + t_p["elixir"]
+        shield_on = float(t_p.get("shield_until", 0)) > time.time()
+        shield_tag = "🛡️护盾中" if shield_on else "✅可进攻"
         lines.append(
             f"• {safe_html(t_p['name'])} | 🏰Lv.{th_lv} | "
-            f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | "
+            f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | {shield_tag} | "
             f"💰{fmt_num(t_p['gold'])} 💧{fmt_num(t_p['elixir'])}"
         )
+        action_icon = "👁️" if shield_on else "⚔️"
         btns.append([InlineKeyboardButton(
-            text=f"⚔️ {t_p['name']} (🏰{th_lv} 💰💧{fmt_num(total_res)})",
+            text=f"{action_icon} {t_p['name']} (🏰{th_lv} 💰💧{fmt_num(total_res)})",
             callback_data=f"vm:atgt:{t_uid}:{uid}")])
     btns.append([
         InlineKeyboardButton(text="🔄 换一批", callback_data=f"vm:attack:{uid}"),
