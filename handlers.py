@@ -2136,8 +2136,8 @@ async def cmd_compensate(msg: types.Message):
         f"🎁 已向全体 <b>{len(uids)}</b> 名玩家发放补偿（仅资源，不含积分）：\n"
         f"• 💰 金币 <b>+500</b>\n"
         f"• 💧 圣水 <b>+500</b>\n\n"
-        f"📋 <b>本次更新内容</b>\n"
-        f"{desc}\n\n"
+        f"📋 <b>更新内容</b>\n"
+        f"• {desc}\n\n"
         f"感谢耐心等待，继续战斗！"
     )
 

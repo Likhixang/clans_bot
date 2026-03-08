@@ -23,7 +23,7 @@ from models import (
 from combat import (
     _pending_collectable, _calc_resource_loot, _estimate_last_collect_after_loot,
 )
-from utils import mention, fmt_num, send
+from utils import safe_html, fmt_num, send
 
 logger = logging.getLogger(__name__)
 BOT_ATTACKER_NAMES = [
@@ -604,7 +604,7 @@ async def _notify_bot_attack(uid: str, p: dict, result: dict):
     elixir = int(result.get("elixir", 0))
     attacker = str(result.get("attacker", "🤖 袭击者"))
     shield_cut_seconds = int(result.get("shield_cut_seconds", 0))
-    target = mention(uid, p.get("name", "未知玩家"))
+    target = safe_html(p.get("name", "未知玩家"))
     if failed_by_shield:
         cut_text = ""
         if shield_cut_seconds > 0:
