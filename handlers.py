@@ -22,6 +22,8 @@ from models import (
     add_gold, add_elixir, add_points, set_buildings, set_troops,
     get_max_gold, get_max_elixir, get_army_capacity, get_army_size,
     get_defense_power, get_available_troops,
+    get_repair_cost_for_building, get_building_damage_ratio, set_building_damage,
+    iter_damageable_defense_buildings,
     create_clan, get_clan, join_clan, leave_clan, list_clans,
     get_all_player_uids, incr_field, get_battle_log,
     set_field,
@@ -299,6 +301,30 @@ async def _break_shield_with_refund(uid: str, p: dict) -> int:
     p["shield_purchase_points"] = 0
     p["shield_refund_eligible"] = 0
     return int(refund) if refund.is_integer() else refund
+
+
+async def _repair_defense_buildings(uid: str, p: dict, bids: list[str]) -> tuple[int, list[str]]:
+    damage_map = p.get("building_damage", {})
+    if not isinstance(damage_map, dict):
+        damage_map = {}
+    repaired: list[str] = []
+    total_cost = 0
+    for bid in bids:
+        dmg = get_building_damage_ratio(p, bid)
+        if dmg <= 0:
+            continue
+        c = get_repair_cost_for_building(p, bid)
+        if c <= 0 or p["gold"] < c:
+            continue
+        p["gold"] -= c
+        total_cost += c
+        damage_map[bid] = 0.0
+        repaired.append(bid)
+    if total_cost > 0:
+        await add_gold(uid, -total_cost)
+        await set_building_damage(uid, damage_map)
+        p["building_damage"] = damage_map
+    return total_cost, repaired
 
 
 async def _maybe_auto_collect(uid: str, p: dict) -> tuple[int, int]:
@@ -601,6 +627,7 @@ async def cmd_help(msg: types.Message):
         "/clan_buy [金币/圣水] [积分] - 积分1:1购买资源\n"
         "/clan_swap [金币/圣水] [数量] - 金币/圣水互换（损耗2%）\n\n"
         "/clan_sell [金币/圣水] [数量] - 资源换积分（每100=1积分，另收2%资源税）\n\n"
+        "/clan_repair [建筑名/全部] - 花金币修复受损防御建筑\n\n"
         "🏗️ <b>建造</b>\n"
         "/clan_shop - 建筑商店\n"
         "/clan_build - 建造新建筑（推荐用商店按钮）\n"
@@ -748,6 +775,40 @@ async def cmd_buy(msg: types.Message):
 
     await msg.reply(
         f"✅ 兑换成功：消耗 🪙 {fmt_num(points_cost)} → 获得 {'💰' if target == 'gold' else '💧'} {fmt_num(points_cost)}"
+    )
+
+
+@router.message(Command("clan_repair"))
+async def cmd_repair(msg: types.Message):
+    if not _check(msg):
+        return
+    args = msg.text.split()
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    await _maybe_auto_collect(uid, p)
+
+    if len(args) == 1:
+        targets = iter_damageable_defense_buildings(p)
+    else:
+        token = args[1].strip().lower()
+        if token in {"all", "全部", "全修"}:
+            targets = iter_damageable_defense_buildings(p)
+        else:
+            bid = _resolve_building_id(args[1])
+            if not bid or "defense" not in BUILDINGS.get(bid, {}):
+                await msg.reply("❌ 仅支持修复防御建筑（加农炮/箭塔/城墙）")
+                return
+            targets = [bid]
+
+    total_cost, repaired = await _repair_defense_buildings(uid, p, targets)
+    if not repaired:
+        await msg.reply("ℹ️ 没有可修复建筑，或金币不足以维修。")
+        return
+    names = "、".join(BUILDINGS[bid]["name"] for bid in repaired)
+    await msg.reply(
+        f"🛠️ 已修复: {names}\n"
+        f"花费: 💰 {fmt_num(total_cost)}\n"
+        f"当前金币: 💰 {fmt_num(p['gold'])}"
     )
 
 
@@ -2500,7 +2561,12 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             elif "capacity" in info:
                 lines.append(f"容量: {fmt_num(info['capacity'][cur_lv - 1])}")
             elif "defense" in info:
-                lines.append(f"防御: {fmt_num(info['defense'][cur_lv - 1])}")
+                dmg_ratio = get_building_damage_ratio(p, bid)
+                base_def = info["defense"][cur_lv - 1]
+                eff_def = base_def * (1.0 - dmg_ratio)
+                lines.append(f"防御: {fmt_num(eff_def)} / {fmt_num(base_def)}")
+                if dmg_ratio > 0:
+                    lines.append(f"损伤: {dmg_ratio * 100:.1f}%")
             if cur_lv < info["max_level"]:
                 lines.append(f"\n⚠️ 受大本营限制，需先升级大本营")
             btns = []
@@ -2514,14 +2580,27 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
                 lines.append(f"容量: {fmt_num(info['capacity'][cur_lv - 1])}")
                 lines.append(f"下一级: Lv.{cur_lv + 1} → {fmt_num(info['capacity'][cur_lv])}")
             elif "defense" in info:
-                lines.append(f"防御: {fmt_num(info['defense'][cur_lv - 1])}")
-                lines.append(f"下一级: Lv.{cur_lv + 1} → {fmt_num(info['defense'][cur_lv])}")
+                dmg_ratio = get_building_damage_ratio(p, bid)
+                base_def = info["defense"][cur_lv - 1]
+                next_def = info["defense"][cur_lv]
+                eff_def = base_def * (1.0 - dmg_ratio)
+                lines.append(f"防御: {fmt_num(eff_def)} / {fmt_num(base_def)}")
+                if dmg_ratio > 0:
+                    lines.append(f"损伤: {dmg_ratio * 100:.1f}%")
+                lines.append(f"下一级: Lv.{cur_lv + 1} → {fmt_num(next_def)}")
             elif bid == "town_hall":
                 lines.append(f"下一级: Lv.{cur_lv + 1}")
             lines.append(f"升级费: {res_icon} {fmt_num(cost)}")
             btns = [[InlineKeyboardButton(
                 text=f"⬆️ 升级 ({res_icon}{fmt_num(cost)})",
                 callback_data=f"vm:up:{bid}:{uid}")]]
+        if cur_lv > 0 and "defense" in info:
+            repair_cost = get_repair_cost_for_building(p, bid)
+            if repair_cost > 0:
+                btns.append([InlineKeyboardButton(
+                    text=f"🛠️ 修复 (💰{fmt_num(repair_cost)})",
+                    callback_data=f"vm:rpr:{bid}:{uid}",
+                )])
         btns.append([InlineKeyboardButton(
             text="◀️ 返回商店", callback_data=f"vm:shop:{uid}")])
         kb = InlineKeyboardMarkup(inline_keyboard=btns)
@@ -2581,6 +2660,42 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         except Exception:
             pass
         await cb.answer(f"✅ 升级到 Lv.{cur_lv + 1}")
+
+    elif action == "rpr":
+        bid = parts[2]
+        owner_uid = parts[3]
+        if bid not in BUILDINGS or "defense" not in BUILDINGS[bid]:
+            await cb.answer("❌ 仅防御建筑可修复", show_alert=True)
+            return
+        if p["buildings"].get(bid, 0) <= 0:
+            await cb.answer("❌ 建筑未建造", show_alert=True)
+            return
+        total_cost, repaired = await _repair_defense_buildings(uid, p, [bid])
+        if not repaired:
+            need = get_repair_cost_for_building(p, bid)
+            if need > 0 and p["gold"] < need:
+                await cb.answer(f"❌ 金币不足，需 {fmt_num(need)}", show_alert=True)
+            else:
+                await cb.answer("ℹ️ 当前无需修复", show_alert=True)
+            return
+        info = BUILDINGS[bid]
+        cur_lv = p["buildings"].get(bid, 0)
+        base_def = info["defense"][cur_lv - 1]
+        text = (
+            f"🛠️ <b>{info['name']}</b> 已修复完成\n"
+            f"花费: 💰 {fmt_num(total_cost)}\n"
+            f"防御恢复: {fmt_num(base_def)}\n"
+            f"当前金币: 💰 {fmt_num(p['gold'])}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ 返回该建筑", callback_data=f"vm:gsel:{bid}:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回商店", callback_data=f"vm:shop:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("✅ 修复完成")
 
     elif action == "bu":
         bid = parts[2]

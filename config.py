@@ -332,6 +332,17 @@ CLAN_MAX_MEMBERS = 50
 # ===== 新手保护 =====
 NEWBIE_SHIELD = 8 * 3600  # 8小时
 
+# ===== 护盾溢出衰减（方案5）=====
+# 阈值 = 基础值 + 大本营等级 * 每级增量
+SHIELD_DECAY_THRESHOLD_BASE = 20_000
+SHIELD_DECAY_THRESHOLD_PER_TH = 40_000
+# 新手宽限（秒）：宽限内不触发“资源溢出加速掉盾”
+SHIELD_DECAY_NEWBIE_GRACE = 10 * 3600
+# 分段衰减速率（每小时额外衰减秒数）
+SHIELD_DECAY_RATE_LOW = 15 * 60     # 1.0x~1.5x 阈值
+SHIELD_DECAY_RATE_MID = 30 * 60     # 1.5x~2.0x 阈值
+SHIELD_DECAY_RATE_HIGH = 60 * 60    # >=2.0x 阈值
+
 # ===== 停机维护 =====
 # 每次停机修复后更新此处，停机补偿公告会自动带上本次修复说明
 LAST_FIX_DESC = (

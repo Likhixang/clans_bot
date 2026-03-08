@@ -9,10 +9,16 @@ import sqlite3
 import time
 
 from core import bot, redis, points_redis
-from config import SUPER_ADMIN_ID, TZ_BJ, LOOT_PERCENT, ALLOWED_CHAT_ID
+from config import (
+    SUPER_ADMIN_ID, TZ_BJ, LOOT_PERCENT, ALLOWED_CHAT_ID,
+    SHIELD_DECAY_THRESHOLD_BASE, SHIELD_DECAY_THRESHOLD_PER_TH, SHIELD_DECAY_NEWBIE_GRACE,
+    SHIELD_DECAY_RATE_LOW, SHIELD_DECAY_RATE_MID, SHIELD_DECAY_RATE_HIGH,
+)
 from models import (
     get_all_player_uids, get_player, collect_resources, get_defense_power,
-    add_gold, add_elixir, set_field, add_battle_log,
+    add_gold, add_elixir, set_field, add_battle_log, set_building_damage,
+    get_effective_building_defense, iter_damageable_defense_buildings,
+    apply_building_damage_increments,
 )
 from combat import (
     _pending_collectable, _calc_resource_loot, _estimate_last_collect_after_loot,
@@ -28,6 +34,14 @@ BOT_ATTACKER_NAMES = [
     "🐍 蛇群",
     "🐒 猴群",
 ]
+BOT_ATTACKER_PROFILES = {
+    "🐺 狼群": {"atk_min": 800, "atk_max": 4200, "dmg_scale": 1.0, "mult": {"cannon": 0.95, "archer_tower": 1.10, "wall": 1.05}},
+    "🐻 熊群": {"atk_min": 1000, "atk_max": 5000, "dmg_scale": 1.2, "mult": {"cannon": 1.20, "archer_tower": 0.90, "wall": 1.10}},
+    "🐗 野猪群": {"atk_min": 900, "atk_max": 4600, "dmg_scale": 1.15, "mult": {"cannon": 1.10, "archer_tower": 0.95, "wall": 1.25}},
+    "🦅 鹰群": {"atk_min": 850, "atk_max": 4300, "dmg_scale": 0.95, "mult": {"cannon": 0.85, "archer_tower": 1.25, "wall": 0.80}},
+    "🐍 蛇群": {"atk_min": 750, "atk_max": 3900, "dmg_scale": 0.9, "mult": {"cannon": 1.05, "archer_tower": 1.00, "wall": 0.90}},
+    "🐒 猴群": {"atk_min": 820, "atk_max": 4100, "dmg_scale": 1.0, "mult": {"cannon": 0.90, "archer_tower": 1.15, "wall": 0.95}},
+}
 BOT_MIN_INTERVAL_SECONDS = 5400  # 1.5h，每个玩家冷却
 BOT_GLOBAL_GAP_LIMIT_SECONDS = 5400  # 全局 1.5h 至少一次
 BOT_GLOBAL_LAST_KEY = "coc:bot_last_global_attack"
@@ -36,6 +50,7 @@ DB_FILE = "backup.db"
 BACKUP_GLOB = "backup_*.db"
 BACKUP_KEEP = 3
 AUTO_COLLECT_TICK_SECONDS = 30
+SHIELD_DECAY_TICK_SECONDS = 60
 
 
 def _points_key(uid: str) -> str:
@@ -95,6 +110,7 @@ def _init_db(conn: sqlite3.Connection):
         shield_refund_eligible INTEGER DEFAULT 0,
         bot_last_attack REAL DEFAULT 0,
         bot_next_attack_at REAL DEFAULT 0,
+        building_damage TEXT DEFAULT '{}',
         created_at TEXT
     )''')
     cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
@@ -112,6 +128,8 @@ def _init_db(conn: sqlite3.Connection):
         c.execute("ALTER TABLE players ADD COLUMN bot_last_attack REAL DEFAULT 0")
     if "bot_next_attack_at" not in cols:
         c.execute("ALTER TABLE players ADD COLUMN bot_next_attack_at REAL DEFAULT 0")
+    if "building_damage" not in cols:
+        c.execute("ALTER TABLE players ADD COLUMN building_damage TEXT DEFAULT '{}'")
     c.execute('''CREATE TABLE IF NOT EXISTS clans (
         clan_id TEXT PRIMARY KEY,
         name TEXT,
@@ -164,6 +182,7 @@ async def perform_backup() -> dict:
                 int(raw.get("shield_refund_eligible", 0)),
                 float(raw.get("bot_last_attack", 0)),
                 float(raw.get("bot_next_attack_at", 0)),
+                raw.get("building_damage", "{}"),
                 raw.get("created_at", ""),
             ))
         # 战斗日志
@@ -198,7 +217,7 @@ async def perform_backup() -> dict:
         c = conn.cursor()
         c.execute("BEGIN TRANSACTION")
         c.executemany(
-            "INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             players_data,
         )
         c.executemany(
@@ -261,6 +280,8 @@ async def perform_restore() -> dict:
             + ("bot_last_attack" if "bot_last_attack" in has else "0 as bot_last_attack")
             + ","
             + ("bot_next_attack_at" if "bot_next_attack_at" in has else "0 as bot_next_attack_at")
+            + ","
+            + ("building_damage" if "building_damage" in has else "'{}' as building_damage")
             + ",created_at FROM players"
         )
         players = c.fetchall()
@@ -302,7 +323,8 @@ async def perform_restore() -> dict:
             "shield_refund_eligible": str(row[16]),
             "bot_last_attack": str(row[17]),
             "bot_next_attack_at": str(row[18]),
-            "created_at": row[19],
+            "building_damage": row[19],
+            "created_at": row[20],
         }
         pipe.hset(f"coc:{uid}", mapping=mapping)
         pipe.sadd("coc:all_players", uid)
@@ -410,10 +432,84 @@ async def auto_collect_task():
         await asyncio.sleep(AUTO_COLLECT_TICK_SECONDS)
 
 
-def _bot_attack_stars(defense: float) -> int:
-    attack_power = random.uniform(900, 5200)
+def _shield_decay_rate_per_hour(p: dict) -> float:
+    """返回每小时额外衰减秒数。"""
+    th_lv = int(p.get("buildings", {}).get("town_hall", 1))
+    threshold = SHIELD_DECAY_THRESHOLD_BASE + th_lv * SHIELD_DECAY_THRESHOLD_PER_TH
+    threshold = max(1.0, float(threshold))
+    loot_total = float(int(p.get("gold", 0)) + int(p.get("elixir", 0)))
+    loot_total += float(_pending_collectable(p, "gold") + _pending_collectable(p, "elixir"))
+    ratio = loot_total / threshold
+    if ratio >= 2.0:
+        return float(SHIELD_DECAY_RATE_HIGH)
+    if ratio >= 1.5:
+        return float(SHIELD_DECAY_RATE_MID)
+    if ratio >= 1.0:
+        return float(SHIELD_DECAY_RATE_LOW)
+    return 0.0
+
+
+async def shield_decay_task():
+    """护盾溢出衰减：资源越多，护盾掉得越快。"""
+    last_run = time.time()
+    while True:
+        try:
+            now = time.time()
+            delta = max(1.0, now - last_run)
+            last_run = now
+            uids = await get_all_player_uids()
+            for uid in uids:
+                p = await get_player(uid)
+                if not p:
+                    continue
+                shield_until = float(p.get("shield_until", 0))
+                if shield_until <= now:
+                    continue
+                # 新手宽限
+                created_at = float(p.get("created_at", 0))
+                if created_at > 0 and (now - created_at) < SHIELD_DECAY_NEWBIE_GRACE:
+                    continue
+                decay_per_hour = _shield_decay_rate_per_hour(p)
+                if decay_per_hour <= 0:
+                    continue
+                decay_seconds = decay_per_hour * (delta / 3600.0)
+                new_until = shield_until - decay_seconds
+                if new_until <= now:
+                    await set_field(uid, "shield_until", 0)
+                    await set_field(uid, "shield_source", "")
+                    await set_field(uid, "shield_purchase_points", 0)
+                    await set_field(uid, "shield_refund_eligible", 0)
+                else:
+                    await set_field(uid, "shield_until", new_until)
+        except Exception as e:
+            logger.error(f"护盾衰减任务异常: {e}")
+        await asyncio.sleep(SHIELD_DECAY_TICK_SECONDS)
+
+
+def _defense_group_by_bid(bid: str) -> str:
+    if bid == "wall":
+        return "wall"
+    if bid == "cannon" or bid.startswith("cannon_"):
+        return "cannon"
+    return "archer_tower"
+
+
+def _wildlife_defense_power(p: dict, attacker: str) -> float:
+    profile = BOT_ATTACKER_PROFILES.get(attacker, {})
+    mult = profile.get("mult", {})
+    total = 0.0
+    for bid in iter_damageable_defense_buildings(p):
+        base_group = _defense_group_by_bid(bid)
+        ratio = float(mult.get(base_group, 1.0))
+        total += get_effective_building_defense(p, bid) * ratio
+    return total
+
+
+def _bot_attack_stars(defender: dict, attacker: str) -> int:
+    profile = BOT_ATTACKER_PROFILES.get(attacker, {})
+    attack_power = random.uniform(float(profile.get("atk_min", 900)), float(profile.get("atk_max", 5200)))
     final_atk = attack_power * random.uniform(0.85, 1.15)
-    final_def = max(1.0, defense * random.uniform(0.85, 1.15))
+    final_def = max(1.0, _wildlife_defense_power(defender, attacker) * random.uniform(0.85, 1.15))
     ratio = final_atk / final_def
     if ratio >= 2.0:
         return 3
@@ -422,6 +518,21 @@ def _bot_attack_stars(defense: float) -> int:
     if ratio >= 0.6:
         return 1
     return 0
+
+
+def _calc_wildlife_damage_increments(p: dict, stars: int, attacker: str) -> dict[str, float]:
+    """按袭击星级和动物克制关系，生成建筑损伤增量。"""
+    profile = BOT_ATTACKER_PROFILES.get(attacker, {})
+    mult = profile.get("mult", {})
+    dmg_scale = float(profile.get("dmg_scale", 1.0))
+    star_factor = {0: 0.5, 1: 0.9, 2: 1.25, 3: 1.6}.get(stars, 0.9)
+    increments: dict[str, float] = {}
+    for bid in iter_damageable_defense_buildings(p):
+        group = _defense_group_by_bid(bid)
+        group_mult = float(mult.get(group, 1.0))
+        inc = random.uniform(0.008, 0.028) * star_factor * dmg_scale * group_mult
+        increments[bid] = min(0.22, max(0.0, inc))
+    return increments
 
 
 def _bot_target_strength(p: dict) -> float:
@@ -478,6 +589,10 @@ async def _notify_bot_attack(uid: str, p: dict, result: dict):
 
 async def _execute_bot_attack(uid: str, p: dict):
     now = time.time()
+    # 双保险：即使调度异常，也不允许同一玩家 1.5h 内被再次袭击
+    last_attack = float(p.get("bot_last_attack", 0))
+    if last_attack > 0 and (now - last_attack) < BOT_MIN_INTERVAL_SECONDS:
+        return
     attacker = random.choice(BOT_ATTACKER_NAMES)
     if float(p.get("shield_until", 0)) > now:
         await set_field(uid, "bot_last_attack", now)
@@ -495,7 +610,7 @@ async def _execute_bot_attack(uid: str, p: dict):
         await _notify_bot_attack(uid, p, result)
         return
 
-    stars = _bot_attack_stars(get_defense_power(p))
+    stars = _bot_attack_stars(p, attacker)
     pct = LOOT_PERCENT[stars]
     pending_gold = _pending_collectable(p, "gold")
     pending_elixir = _pending_collectable(p, "elixir")
@@ -514,6 +629,9 @@ async def _execute_bot_attack(uid: str, p: dict):
         if new_last is not None:
             await set_field(uid, "last_collect", new_last)
     # 动物袭击不提供护盾；护盾只来自玩家攻击或积分购买。
+    damage_increments = _calc_wildlife_damage_increments(p, stars, attacker)
+    new_damage_map = apply_building_damage_increments(p, damage_increments)
+    await set_building_damage(uid, new_damage_map)
     await set_field(uid, "bot_last_attack", time.time())
     await set_field(uid, "bot_next_attack_at", _next_attack_at_after_attack())
     await add_battle_log(uid, {
@@ -551,9 +669,16 @@ async def random_bot_attack_task():
                 if next_at <= 0:
                     # 首次初始化到稳定槽位，重启不会重算到新时间。
                     created_at = float(p.get("created_at", 0))
-                    init_at = _initial_next_attack_at(uid, created_at)
+                    last_attack = float(p.get("bot_last_attack", 0))
+                    by_slot = _initial_next_attack_at(uid, created_at)
+                    by_last = (last_attack + BOT_MIN_INTERVAL_SECONDS) if last_attack > 0 else 0.0
+                    init_at = max(by_slot, by_last)
                     await set_field(uid, "bot_next_attack_at", init_at)
                     p["bot_next_attack_at"] = init_at
+                    continue
+                # 硬限制：每个玩家 1.5h 内至多一次
+                last_attack = float(p.get("bot_last_attack", 0))
+                if last_attack > 0 and (now - last_attack) < BOT_MIN_INTERVAL_SECONDS:
                     continue
                 if now < next_at:
                     continue

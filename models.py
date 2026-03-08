@@ -10,6 +10,7 @@ from config import (
 )
 
 SHARED_POINTS_INIT = 20000.0
+DAMAGE_DEFENSE_BASES = ("cannon", "archer_tower", "wall")
 
 
 def _round_half_up(n: float) -> int:
@@ -96,6 +97,8 @@ async def ensure_player(uid: str, name: str) -> dict:
             await redis.hset(f"coc:{uid}", "bot_last_attack", "0")
         if "bot_next_attack_at" not in data:
             await redis.hset(f"coc:{uid}", "bot_next_attack_at", "0")
+        if "building_damage" not in data:
+            await redis.hset(f"coc:{uid}", "building_damage", "{}")
         p["points"] = await get_points(uid)
         if abs(float(data.get("points", 0)) - p["points"]) > 1e-9:
             await redis.hset(f"coc:{uid}", "points", str(p["points"]))
@@ -125,6 +128,7 @@ async def init_player(uid: str, name: str) -> dict:
         "shield_refund_eligible": "0",
         "bot_last_attack": "0",
         "bot_next_attack_at": "0",
+        "building_damage": "{}",
         "created_at": str(now),
     }
     await redis.hset(f"coc:{uid}", mapping=data)
@@ -155,6 +159,7 @@ def _parse(data: dict) -> dict:
         "shield_refund_eligible": int(data.get("shield_refund_eligible", 0)),
         "bot_last_attack": float(data.get("bot_last_attack", 0)),
         "bot_next_attack_at": float(data.get("bot_next_attack_at", 0)),
+        "building_damage": json.loads(data.get("building_damage", "{}")),
         "created_at": float(data.get("created_at", 0)),
     }
 
@@ -289,6 +294,10 @@ async def set_troops(uid: str, troops: dict):
     await redis.hset(f"coc:{uid}", "troops", json.dumps(troops))
 
 
+async def set_building_damage(uid: str, damage: dict):
+    await redis.hset(f"coc:{uid}", "building_damage", json.dumps(damage))
+
+
 async def incr_field(uid: str, field: str, amount: int = 1):
     await redis.hincrby(f"coc:{uid}", field, amount)
 
@@ -321,8 +330,61 @@ def get_defense_power(p: dict) -> float:
     for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower") + ["wall"]:
         lv = bld.get(bid, 0)
         if lv > 0:
-            total += BUILDINGS[bid]["defense"][lv - 1]
+            total += get_effective_building_defense(p, bid)
     return total
+
+
+def get_building_damage_ratio(p: dict, bid: str) -> float:
+    raw = p.get("building_damage", {})
+    if not isinstance(raw, dict):
+        return 0.0
+    v = float(raw.get(bid, 0) or 0)
+    return min(1.0, max(0.0, v))
+
+
+def get_effective_building_defense(p: dict, bid: str) -> float:
+    lv = int(p.get("buildings", {}).get(bid, 0))
+    if lv <= 0:
+        return 0.0
+    base = float(BUILDINGS[bid]["defense"][lv - 1])
+    dmg_ratio = get_building_damage_ratio(p, bid)
+    return max(0.0, base * (1.0 - dmg_ratio))
+
+
+def get_repair_cost_for_building(p: dict, bid: str) -> int:
+    lv = int(p.get("buildings", {}).get(bid, 0))
+    if lv <= 0 or "defense" not in BUILDINGS.get(bid, {}):
+        return 0
+    dmg_ratio = get_building_damage_ratio(p, bid)
+    if dmg_ratio <= 0:
+        return 0
+    costs = BUILDINGS[bid].get("costs", [])
+    idx = min(max(lv - 1, 0), max(len(costs) - 1, 0))
+    ref_cost = float(costs[idx]) if costs else 1000.0
+    return max(20, int(round(ref_cost * 0.18 * dmg_ratio)))
+
+
+def iter_damageable_defense_buildings(p: dict) -> list[str]:
+    bld = p.get("buildings", {})
+    ids: list[str] = []
+    for base in DAMAGE_DEFENSE_BASES:
+        for bid in _building_series_ids(base):
+            if int(bld.get(bid, 0)) > 0 and "defense" in BUILDINGS.get(bid, {}):
+                ids.append(bid)
+    return ids
+
+
+def apply_building_damage_increments(p: dict, increments: dict[str, float]) -> dict:
+    cur = p.get("building_damage", {})
+    if not isinstance(cur, dict):
+        cur = {}
+    new_map = dict(cur)
+    for bid, inc in increments.items():
+        if inc <= 0:
+            continue
+        old = min(1.0, max(0.0, float(new_map.get(bid, 0) or 0)))
+        new_map[bid] = min(1.0, old + float(inc))
+    return new_map
 
 
 def get_available_troops(p: dict) -> list[str]:

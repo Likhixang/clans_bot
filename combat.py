@@ -6,8 +6,9 @@ from config import (
     TROPHY_ATTACK, TROPHY_DEFENSE, LOOT_STORAGE_FACTOR, LOOT_COLLECTOR_FACTOR,
 )
 from models import (
-    get_player, get_all_player_uids, get_defense_power,
-    add_gold, add_elixir, set_troops, set_field, incr_field,
+    get_player, get_all_player_uids, get_defense_power, get_effective_building_defense,
+    add_gold, add_elixir, set_troops, set_field, incr_field, set_building_damage,
+    iter_damageable_defense_buildings, apply_building_damage_increments,
     get_max_gold, get_max_elixir, add_battle_log,
 )
 
@@ -43,6 +44,21 @@ def _pending_collectable(defender: dict, resource: str, now_ts: float | None = N
     produced = prod_per_hour * elapsed_h
     room = max(0.0, cap - current)
     return max(0, round(min(produced, room)))
+
+
+def _calc_pvp_damage_increments(defender: dict, stars: int) -> dict[str, float]:
+    """玩家进攻造成的防御建筑损伤。"""
+    star_factor = {0: 0.45, 1: 0.8, 2: 1.15, 3: 1.45}.get(stars, 0.8)
+    increments: dict[str, float] = {}
+    for bid in iter_damageable_defense_buildings(defender):
+        if bid == "wall":
+            base = random.uniform(0.004, 0.016)
+        elif bid == "cannon" or bid.startswith("cannon_"):
+            base = random.uniform(0.007, 0.022)
+        else:
+            base = random.uniform(0.008, 0.024)
+        increments[bid] = min(0.20, base * star_factor)
+    return increments
 
 
 def calc_estimated_loot_total(p: dict) -> int:
@@ -230,7 +246,7 @@ def calculate_attack(attacker: dict, defender: dict,
     for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower"):
         lv = bld.get(bid, 0)
         if lv > 0:
-            val = BUILDINGS[bid]["defense"][lv - 1]
+            val = get_effective_building_defense(defender, bid)
             if bid == "cannon" or bid.startswith("cannon_"):
                 cannon_def += val
             else:
@@ -238,7 +254,7 @@ def calculate_attack(attacker: dict, defender: dict,
 
     wall_lv = bld.get("wall", 0)
     if wall_lv > 0:
-        wall_def = BUILDINGS["wall"]["defense"][wall_lv - 1]
+        wall_def = get_effective_building_defense(defender, "wall")
 
     # 空军无视城墙
     effective_wall = 0 if has_air else wall_def
@@ -362,6 +378,11 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         await set_field(defender_uid, "shield_refund_eligible", 0)
         result["defender_shield_seconds"] = shield_seconds
 
+    # 防御设施损伤（被玩家攻击同样会损伤）
+    damage_increments = _calc_pvp_damage_increments(defender, stars)
+    new_damage_map = apply_building_damage_increments(defender, damage_increments)
+    await set_building_damage(defender_uid, new_damage_map)
+
     # 奖杯
     atk_trophy = TROPHY_ATTACK[stars]
     def_trophy = TROPHY_DEFENSE[stars]
@@ -439,14 +460,14 @@ def preview_attack(attacker: dict, defender: dict,
     for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower"):
         lv = bld.get(bid, 0)
         if lv > 0:
-            val = BUILDINGS[bid]["defense"][lv - 1]
+            val = get_effective_building_defense(defender, bid)
             if bid == "cannon" or bid.startswith("cannon_"):
                 cannon_def += val
             else:
                 tower_def += val
     wall_lv = bld.get("wall", 0)
     if wall_lv > 0:
-        wall_def = BUILDINGS["wall"]["defense"][wall_lv - 1]
+        wall_def = get_effective_building_defense(defender, "wall")
 
     effective_wall = 0 if has_air else wall_def
     if has_wall_breaker:

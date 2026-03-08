@@ -9,7 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from core import bot, dp, redis, points_redis
 from handlers import router, _compensation_cleanup
 from models import sanitize_all_player_resources
-from tasks import hourly_backup_task, auto_collect_task, random_bot_attack_task
+from tasks import hourly_backup_task, auto_collect_task, random_bot_attack_task, shield_decay_task
 from config import (
     RUN_MODE,
     WEBHOOK_BASE_URL,
@@ -33,6 +33,7 @@ COMMANDS = [
     BotCommand(command="clan_collect", description="收集资源"),
     BotCommand(command="clan_auto", description="购买自动收集"),
     BotCommand(command="clan_shield", description="购买积分护盾"),
+    BotCommand(command="clan_repair", description="修复防御建筑"),
     BotCommand(command="clan_buy", description="积分购买资源"),
     BotCommand(command="clan_swap", description="金币圣水互换"),
     BotCommand(command="clan_sell", description="资源兑换积分"),
@@ -102,6 +103,7 @@ async def main():
     asyncio.create_task(hourly_backup_task())
     asyncio.create_task(auto_collect_task())
     asyncio.create_task(random_bot_attack_task())
+    asyncio.create_task(shield_decay_task())
     await _recover_compensation_pins()
     await bot.set_my_commands(COMMANDS)
     await bot.set_my_commands(COMMANDS, scope=BotCommandScopeAllGroupChats())
