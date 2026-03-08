@@ -280,8 +280,22 @@ def _shield_status_text(p: dict) -> str:
     return f"🛡️ 护盾: 已开启（剩余 {h}小时{m}分钟）"
 
 
+def _calc_break_shield_refund_preview(p: dict, now_ts: float | None = None) -> int:
+    now = time.time() if now_ts is None else float(now_ts)
+    if float(p.get("shield_until", 0)) <= now:
+        return 0
+    if p.get("shield_source") != "purchased":
+        return 0
+    if int(p.get("shield_refund_eligible", 0)) != 1:
+        return 0
+    paid = float(p.get("shield_purchase_points", 0))
+    remain = max(0.0, float(p.get("shield_until", 0)) - now)
+    ratio = min(1.0, remain / float(POINTS_SHIELD_DURATION))
+    return int(max(0.0, min(paid, paid * ratio)) + 0.5)
+
+
 async def _break_shield_with_refund(uid: str, p: dict) -> int:
-    """手动打断积分护盾时返还 50% 积分。返回返还积分。"""
+    """手动打断积分护盾时按剩余时间比例返还积分（整数四舍五入）。"""
     refund = 0
     now = time.time()
     is_active = float(p.get("shield_until", 0)) > now
@@ -290,11 +304,10 @@ async def _break_shield_with_refund(uid: str, p: dict) -> int:
         and p.get("shield_source") == "purchased"
         and int(p.get("shield_refund_eligible", 0)) == 1
     ):
-        paid = float(p.get("shield_purchase_points", 0))
-        refund = round(max(0.0, paid * 0.5), 2)
+        refund = _calc_break_shield_refund_preview(p, now_ts=now)
         if refund > 0:
             await add_points(uid, refund)
-            p["points"] = round(float(p.get("points", 0)) + refund, 2)
+            p["points"] = round(float(p.get("points", 0)) + float(refund), 2)
     await set_field(uid, "shield_until", "0")
     await set_field(uid, "shield_source", "")
     await set_field(uid, "shield_purchase_points", "0")
@@ -303,7 +316,7 @@ async def _break_shield_with_refund(uid: str, p: dict) -> int:
     p["shield_source"] = ""
     p["shield_purchase_points"] = 0
     p["shield_refund_eligible"] = 0
-    return int(refund) if refund.is_integer() else refund
+    return int(refund)
 
 
 async def _apply_observe_shield_decay(target_uid: str, target_p: dict) -> tuple[int, int]:
@@ -878,7 +891,7 @@ async def cmd_shield(msg: types.Message):
     h, m = divmod(remain // 60, 60)
     await msg.reply(
         f"✅ 已消耗 🪙{fmt_num(shield_cost)} 开启 {h}小时{m}分钟 积分护盾\n"
-        "⚠️ 主动打断并发起进攻时，可返还 50% 积分"
+        "⚠️ 主动打断并发起进攻时，可按剩余时间比例返还积分（整数四舍五入）"
     )
 
 
@@ -1396,8 +1409,7 @@ async def cmd_attack(msg: types.Message):
         h, m = divmod(remain // 60, 60)
         extra = ""
         if p.get("shield_source") == "purchased" and int(p.get("shield_refund_eligible", 0)) == 1:
-            paid = float(p.get("shield_purchase_points", 0))
-            extra = f"\n打断并进攻将返还 50%：🪙{fmt_num(round(paid * 0.5, 2))}"
+            extra = f"\n打断并进攻预计返还：🪙{fmt_num(_calc_break_shield_refund_preview(p))}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⚔️ 放弃护盾并攻击", callback_data=f"break_shield_{uid}")]
         ])
@@ -2274,7 +2286,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         text, kb = _render_exchange_panel(uid, p)
         text += (
             f"\n\n✅ 已消耗 🪙{fmt_num(shield_cost)} 开启 6 小时积分护盾"
-            f"\n⚠️ 主动打断并发起进攻时，可返还 50% 积分"
+            f"\n⚠️ 主动打断并发起进攻时，可按剩余时间比例返还积分（整数四舍五入）"
         )
         try:
             await cb.message.edit_text(text, reply_markup=kb)
@@ -3016,8 +3028,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             h, m = divmod(remain // 60, 60)
             extra = ""
             if p.get("shield_source") == "purchased" and int(p.get("shield_refund_eligible", 0)) == 1:
-                paid = float(p.get("shield_purchase_points", 0))
-                extra = f"\n打断并进攻将返还 50%：🪙{fmt_num(round(paid * 0.5, 2))}"
+                extra = f"\n打断并进攻预计返还：🪙{fmt_num(_calc_break_shield_refund_preview(p))}"
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚔️ 放弃护盾并攻击", callback_data=f"vm:brk:{uid}")],
                 [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
