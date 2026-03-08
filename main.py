@@ -9,7 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from core import bot, dp, redis, points_redis
 from handlers import router, _compensation_cleanup
 from models import sanitize_all_player_resources
-from tasks import hourly_backup_task, auto_collect_task
+from tasks import hourly_backup_task, auto_collect_task, random_bot_attack_task
 from config import (
     RUN_MODE,
     WEBHOOK_BASE_URL,
@@ -100,6 +100,7 @@ async def main():
     logger.info("Resource normalization finished: total=%s fixed=%s", total_players, fixed_players)
     asyncio.create_task(hourly_backup_task())
     asyncio.create_task(auto_collect_task())
+    asyncio.create_task(random_bot_attack_task())
     await _recover_compensation_pins()
     await bot.set_my_commands(COMMANDS)
     await bot.set_my_commands(COMMANDS, scope=BotCommandScopeAllGroupChats())

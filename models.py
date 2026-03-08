@@ -86,6 +86,14 @@ async def ensure_player(uid: str, name: str) -> dict:
             })
         if "auto_collect_until" not in data:
             await redis.hset(f"coc:{uid}", "auto_collect_until", "0")
+        if "shield_source" not in data:
+            await redis.hset(f"coc:{uid}", "shield_source", "")
+        if "shield_purchase_points" not in data:
+            await redis.hset(f"coc:{uid}", "shield_purchase_points", "0")
+        if "shield_refund_eligible" not in data:
+            await redis.hset(f"coc:{uid}", "shield_refund_eligible", "0")
+        if "bot_last_attack" not in data:
+            await redis.hset(f"coc:{uid}", "bot_last_attack", "0")
         p["points"] = await get_points(uid)
         if abs(float(data.get("points", 0)) - p["points"]) > 1e-9:
             await redis.hset(f"coc:{uid}", "points", str(p["points"]))
@@ -110,6 +118,10 @@ async def init_player(uid: str, name: str) -> dict:
         "attack_losses": "0",
         "trophies": "0",
         "auto_collect_until": "0",
+        "shield_source": "newbie",
+        "shield_purchase_points": "0",
+        "shield_refund_eligible": "0",
+        "bot_last_attack": "0",
         "created_at": str(now),
     }
     await redis.hset(f"coc:{uid}", mapping=data)
@@ -135,6 +147,10 @@ def _parse(data: dict) -> dict:
         "attack_losses": int(data.get("attack_losses", 0)),
         "trophies": int(data.get("trophies", 0)),
         "auto_collect_until": float(data.get("auto_collect_until", 0)),
+        "shield_source": data.get("shield_source", ""),
+        "shield_purchase_points": round(float(data.get("shield_purchase_points", 0)), 2),
+        "shield_refund_eligible": int(data.get("shield_refund_eligible", 0)),
+        "bot_last_attack": float(data.get("bot_last_attack", 0)),
     }
 
 

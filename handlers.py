@@ -13,7 +13,7 @@ from typing import Callable, Any, Dict, Awaitable
 from config import (
     BUILDINGS, TROOPS, ALLOWED_CHAT_ID, ALLOWED_THREAD_ID,
     CLAN_CREATE_COST, SUPER_ADMIN_ID, ADMIN_IDS,
-    SHIELD_DURATION, TROPHY_ATTACK, NEWBIE_SHIELD, TZ_BJ,
+    NEWBIE_SHIELD, TZ_BJ,
     LAST_FIX_DESC,
 )
 from core import redis, bot
@@ -28,7 +28,8 @@ from models import (
 )
 from combat import (
     find_target, find_targets, calculate_attack, execute_attack,
-    preview_attack, recommend_troops, _pending_collectable,
+    preview_attack, recommend_troops, _pending_collectable, calc_points_shield_cost,
+    calc_defense_shield_seconds,
 )
 from tasks import perform_backup, perform_restore, get_latest_backup_path, BACKUP_KEEP
 from utils import safe_html, mention, fmt_num, send, pin_in_topic, auto_delete, delete_msg_by_id
@@ -38,6 +39,7 @@ router = Router()
 logger = logging.getLogger(__name__)
 AUTO_COLLECT_COST = 300
 AUTO_COLLECT_DURATION = 6 * 3600
+POINTS_SHIELD_DURATION = 6 * 3600
 
 # ───────────────────── 停机维护中间件 ─────────────────────
 
@@ -259,6 +261,46 @@ def _auto_collect_text(p: dict) -> str:
     return f"🤖 自动收集: 已开启（剩余 {h}小时{m}分钟）"
 
 
+def _shield_status_text(p: dict) -> str:
+    until = float(p.get("shield_until", 0))
+    if until <= time.time():
+        return "🛡️ 护盾: 未开启"
+    remain = int(until - time.time())
+    h, m = divmod(remain // 60, 60)
+    source = p.get("shield_source", "")
+    if source == "purchased":
+        return f"🛡️ 护盾: 已开启（积分护盾，剩余 {h}小时{m}分钟）"
+    if source == "defense":
+        return f"🛡️ 护盾: 已开启（防守获得，剩余 {h}小时{m}分钟）"
+    return f"🛡️ 护盾: 已开启（剩余 {h}小时{m}分钟）"
+
+
+async def _break_shield_with_refund(uid: str, p: dict) -> int:
+    """手动打断积分护盾时返还 50% 积分。返回返还积分。"""
+    refund = 0
+    now = time.time()
+    is_active = float(p.get("shield_until", 0)) > now
+    if (
+        is_active
+        and p.get("shield_source") == "purchased"
+        and int(p.get("shield_refund_eligible", 0)) == 1
+    ):
+        paid = float(p.get("shield_purchase_points", 0))
+        refund = round(max(0.0, paid * 0.5), 2)
+        if refund > 0:
+            await add_points(uid, refund)
+            p["points"] = round(float(p.get("points", 0)) + refund, 2)
+    await set_field(uid, "shield_until", "0")
+    await set_field(uid, "shield_source", "")
+    await set_field(uid, "shield_purchase_points", "0")
+    await set_field(uid, "shield_refund_eligible", "0")
+    p["shield_until"] = 0
+    p["shield_source"] = ""
+    p["shield_purchase_points"] = 0
+    p["shield_refund_eligible"] = 0
+    return int(refund) if refund.is_integer() else refund
+
+
 async def _maybe_auto_collect(uid: str, p: dict) -> tuple[int, int]:
     if float(p.get("auto_collect_until", 0)) <= time.time():
         return 0, 0
@@ -453,6 +495,8 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
 
 def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
     auto_state = _auto_collect_text(p).replace("🤖 ", "")
+    shield_cost = calc_points_shield_cost(p)
+    shield_state = _shield_status_text(p)
     text = (
         "💱 <b>兑换中心</b>\n\n"
         f"💰 金币: {fmt_num(p['gold'])}\n"
@@ -463,7 +507,9 @@ def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup
         "• 金币/圣水互换：损耗 2%（四舍五入）\n"
         "• 资源兑换积分：每100资源=1积分，另收2%资源税\n"
         f"• 自动收集：6小时，花费 💰 {AUTO_COLLECT_COST}\n\n"
-        f"{auto_state}"
+        f"• 积分护盾：6小时，当前价格 🪙 {shield_cost}（按大本营/防御/可掠夺资源动态计算）\n\n"
+        f"{auto_state}\n"
+        f"{shield_state}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -491,6 +537,7 @@ def _render_exchange_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup
             InlineKeyboardButton(text="💧5000 → 🪙50", callback_data=f"vm:xp:e:5000:{uid}"),
         ],
         [InlineKeyboardButton(text=f"🤖 💰{AUTO_COLLECT_COST} 开6h", callback_data=f"vm:autob:g:{uid}")],
+        [InlineKeyboardButton(text=f"🛡️ 🪙{shield_cost} 开6h", callback_data=f"vm:sbuy:{uid}")],
         [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
     ])
     return text, kb
@@ -1215,12 +1262,16 @@ async def cmd_attack(msg: types.Message):
     if p["shield_until"] > time.time():
         remain = int(p["shield_until"] - time.time())
         h, m = divmod(remain // 60, 60)
+        extra = ""
+        if p.get("shield_source") == "purchased" and int(p.get("shield_refund_eligible", 0)) == 1:
+            paid = float(p.get("shield_purchase_points", 0))
+            extra = f"\n打断并进攻将返还 50%：🪙{fmt_num(round(paid * 0.5, 2))}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⚔️ 放弃护盾并攻击", callback_data=f"break_shield_{uid}")]
         ])
         await msg.reply(
             f"🛡️ 你有护盾保护（剩余 {h}小时{m}分钟）\n"
-            "攻击将会移除护盾！",
+            f"攻击将会移除护盾！{extra}",
             reply_markup=kb,
         )
         return
@@ -1270,10 +1321,11 @@ async def cb_break_shield(cb: types.CallbackQuery):
     name = cb.from_user.full_name or cb.from_user.username or "无名"
     p = await ensure_player(uid, name)
 
-    await set_field(uid, "shield_until", "0")
-    p["shield_until"] = 0
-
-    await cb.message.edit_text("🛡️ → ⚔️ 护盾已移除！正在搜索对手...")
+    refund = await _break_shield_with_refund(uid, p)
+    tip = "🛡️ → ⚔️ 护盾已移除！正在搜索对手..."
+    if refund > 0:
+        tip = f"🛡️ → ⚔️ 护盾已移除，已返还 🪙{fmt_num(refund)}！正在搜索对手..."
+    await cb.message.edit_text(tip)
     await cb.answer()
     await _do_attack(cb.message, uid, name, p)
 
@@ -1959,7 +2011,21 @@ async def cmd_compensate(msg: types.Message):
 
 @router.callback_query(F.data.startswith("vm:"))
 async def cb_village_panel(cb: types.CallbackQuery):
+    try:
+        await _cb_village_panel_impl(cb)
+    except Exception as e:
+        logger.exception("vm callback error data=%s err=%s", cb.data, e)
+        try:
+            await cb.answer("❌ 操作失败，请重试", show_alert=True)
+        except Exception:
+            pass
+
+
+async def _cb_village_panel_impl(cb: types.CallbackQuery):
     parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer("❌ 参数错误，请重新打开面板", show_alert=True)
+        return
     action = parts[1]
     owner_uid = parts[-1]  # uid is always the last segment
 
@@ -2051,9 +2117,46 @@ async def cb_village_panel(cb: types.CallbackQuery):
             pass
         await cb.answer("✅ 自动收集已开启")
 
+    elif action == "sbuy":
+        if float(p.get("shield_until", 0)) > time.time():
+            await cb.answer("❌ 你当前有护盾生效中（含被攻击获得护盾），不能重复购买", show_alert=True)
+            return
+        shield_cost = calc_points_shield_cost(p)
+        if not _has_enough_resource(p["points"], shield_cost):
+            await cb.answer(f"❌ 积分不足，需 {fmt_num(shield_cost)}", show_alert=True)
+            return
+        until = time.time() + POINTS_SHIELD_DURATION
+        await add_points(uid, -shield_cost)
+        await set_field(uid, "shield_until", until)
+        await set_field(uid, "shield_source", "purchased")
+        await set_field(uid, "shield_purchase_points", shield_cost)
+        await set_field(uid, "shield_refund_eligible", 1)
+        p["points"] = round(float(p["points"]) - shield_cost, 2)
+        p["shield_until"] = until
+        p["shield_source"] = "purchased"
+        p["shield_purchase_points"] = shield_cost
+        p["shield_refund_eligible"] = 1
+        text, kb = _render_exchange_panel(uid, p)
+        text += (
+            f"\n\n✅ 已消耗 🪙{fmt_num(shield_cost)} 开启 6 小时积分护盾"
+            f"\n⚠️ 主动打断并发起进攻时，可返还 50% 积分"
+        )
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("✅ 护盾已开启")
+
     elif action == "xb":
+        if len(parts) < 5:
+            await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
+            return
         target_code = parts[2]
-        amount = int(parts[3])
+        try:
+            amount = int(parts[3])
+        except ValueError:
+            await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
+            return
         target = "gold" if target_code == "g" else "elixir"
         target_name = "金币" if target == "gold" else "圣水"
 
@@ -2088,8 +2191,15 @@ async def cb_village_panel(cb: types.CallbackQuery):
         await cb.answer("✅ 兑换成功")
 
     elif action == "xs":
+        if len(parts) < 5:
+            await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
+            return
         source_code = parts[2]
-        amount = int(parts[3])
+        try:
+            amount = int(parts[3])
+        except ValueError:
+            await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
+            return
         source = "gold" if source_code == "g" else "elixir"
         target = "elixir" if source == "gold" else "gold"
         source_name = "金币" if source == "gold" else "圣水"
@@ -2138,8 +2248,15 @@ async def cb_village_panel(cb: types.CallbackQuery):
         await cb.answer("✅ 兑换成功")
 
     elif action == "xp":
+        if len(parts) < 5:
+            await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
+            return
         source_code = parts[2]
-        amount = int(parts[3])
+        try:
+            amount = int(parts[3])
+        except ValueError:
+            await cb.answer("❌ 参数错误，请重新打开兑换面板", show_alert=True)
+            return
         source = "gold" if source_code == "g" else "elixir"
         source_name = "金币" if source == "gold" else "圣水"
         if amount <= 0 or amount % 100 != 0:
@@ -2708,13 +2825,17 @@ async def cb_village_panel(cb: types.CallbackQuery):
         if p["shield_until"] > time.time():
             remain = int(p["shield_until"] - time.time())
             h, m = divmod(remain // 60, 60)
+            extra = ""
+            if p.get("shield_source") == "purchased" and int(p.get("shield_refund_eligible", 0)) == 1:
+                paid = float(p.get("shield_purchase_points", 0))
+                extra = f"\n打断并进攻将返还 50%：🪙{fmt_num(round(paid * 0.5, 2))}"
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚔️ 放弃护盾并攻击", callback_data=f"vm:brk:{uid}")],
                 [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
             ])
             try:
                 await cb.message.edit_text(
-                    f"🛡️ 你有护盾保护（剩余 {h}小时{m}分钟）\n攻击将会移除护盾！",
+                    f"🛡️ 你有护盾保护（剩余 {h}小时{m}分钟）\n攻击将会移除护盾！{extra}",
                     reply_markup=kb,
                 )
             except Exception:
@@ -2725,9 +2846,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
         await _do_attack_inline(cb, uid, name, p)
 
     elif action == "brk":
-        from models import set_field
-        await set_field(uid, "shield_until", "0")
-        p["shield_until"] = 0
+        refund = await _break_shield_with_refund(uid, p)
+        if refund > 0:
+            logger.info("shield refund uid=%s points=%s", uid, refund)
         await _do_attack_inline(cb, uid, name, p)
 
     elif action == "atgt":
@@ -2904,8 +3025,9 @@ async def cb_village_panel(cb: types.CallbackQuery):
             f"⚠️ 出战部队已消耗"
         )
         if stars >= 1:
-            shield_h = SHIELD_DURATION[stars] // 3600
-            text += f"\n🛡️ 对方获得 {shield_h} 小时护盾"
+            sec = int(combat.get("defender_shield_seconds") or calc_defense_shield_seconds(defender, stars))
+            h, m = divmod(sec // 60, 60)
+            text += f"\n🛡️ 对方获得 {h}小时{m}分钟 护盾"
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")]

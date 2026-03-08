@@ -45,6 +45,49 @@ def _pending_collectable(defender: dict, resource: str, now_ts: float | None = N
     return max(0, round(min(produced, room)))
 
 
+def calc_estimated_loot_total(p: dict) -> int:
+    """估算基地当前可被掠夺资源（仓库 + 收集器未收取）。"""
+    pending_gold = _pending_collectable(p, "gold")
+    pending_elixir = _pending_collectable(p, "elixir")
+    return int(max(0, p.get("gold", 0))) + int(max(0, p.get("elixir", 0))) + pending_gold + pending_elixir
+
+
+def calc_points_shield_cost(p: dict) -> int:
+    """积分护盾价格（50~500）：TH/防御/可掠夺资源三者加权。"""
+    th_lv = int(p.get("buildings", {}).get("town_hall", 1))
+    defense = float(get_defense_power(p))
+    loot_total = float(calc_estimated_loot_total(p))
+
+    th_score = min(1.0, max(0.0, th_lv / 10.0))
+    defense_score = min(1.0, max(0.0, defense / 22000.0))
+    loot_score = min(1.0, max(0.0, loot_total / 3000000.0))
+
+    weighted = 0.35 * th_score + 0.35 * defense_score + 0.30 * loot_score
+    cost = round(50 + weighted * 450)
+    return max(50, min(500, int(cost)))
+
+
+def calc_defense_shield_seconds(defender: dict, stars: int) -> int:
+    """防守护盾时长：越强基地越短，最低 1 小时。"""
+    if stars <= 0:
+        return 0
+    base = int(SHIELD_DURATION.get(stars, 0))
+    if base <= 0:
+        return 0
+
+    th_lv = int(defender.get("buildings", {}).get("town_hall", 1))
+    defense = float(get_defense_power(defender))
+    trophies = float(defender.get("trophies", 0))
+
+    th_score = min(1.0, max(0.0, th_lv / 10.0))
+    defense_score = min(1.0, max(0.0, defense / 22000.0))
+    trophy_score = min(1.0, max(0.0, trophies / 6000.0))
+    strength = 0.45 * th_score + 0.40 * defense_score + 0.15 * trophy_score
+
+    reduced = int(round(base * (1.0 - 0.75 * strength)))
+    return max(3600, min(base, reduced))
+
+
 def _calc_resource_loot(stored: int, pending: int, pct: float) -> tuple[int, int, int]:
     """返回 (total_loot, storage_loot, collector_loot)。"""
     storage_target = round(stored * pct * LOOT_STORAGE_FACTOR)
@@ -311,8 +354,13 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
 
     # 护盾
     if stars > 0:
-        shield = time.time() + SHIELD_DURATION[stars]
+        shield_seconds = calc_defense_shield_seconds(defender, stars)
+        shield = time.time() + shield_seconds
         await set_field(defender_uid, "shield_until", shield)
+        await set_field(defender_uid, "shield_source", "defense")
+        await set_field(defender_uid, "shield_purchase_points", 0)
+        await set_field(defender_uid, "shield_refund_eligible", 0)
+        result["defender_shield_seconds"] = shield_seconds
 
     # 奖杯
     atk_trophy = TROPHY_ATTACK[stars]
