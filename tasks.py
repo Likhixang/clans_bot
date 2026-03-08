@@ -16,11 +16,18 @@ from models import (
 )
 from combat import (
     _pending_collectable, _calc_resource_loot, _estimate_last_collect_after_loot,
-    calc_defense_shield_seconds,
 )
 from utils import mention, fmt_num, send
 
 logger = logging.getLogger(__name__)
+BOT_ATTACKER_NAMES = [
+    "🤖 狼群",
+    "🤖 熊群",
+    "🤖 野猪群",
+    "🤖 鹰群",
+    "🤖 蛇群",
+    "🤖 猴群",
+]
 
 DB_FILE = "backup.db"
 BACKUP_GLOB = "backup_*.db"
@@ -417,10 +424,19 @@ def _bot_target_strength(p: dict) -> float:
     return 0.45 * th_score + 0.40 * def_score + 0.15 * trophy_score
 
 
-def _bot_target_cooldown_seconds(p: dict) -> int:
-    """越强冷却越短；最短 20 分钟，最长 1.5 小时。"""
+def _bot_should_attack_now(p: dict, elapsed: float) -> bool:
+    """随机触发进攻：每人 1.5h 内最多一次，超过后按强度概率触发。"""
+    min_interval = 5400  # 1.5h，硬冷却
+    if elapsed < min_interval:
+        return False
+
     strength = _bot_target_strength(p)
-    return int(round(5400 - 4200 * strength))
+    overdue = elapsed - min_interval
+    # 过了 1.5h 后每分钟判定一次；越强基础概率更高，拖得越久概率缓慢上升（但不强制）
+    base = 0.04 + 0.14 * strength
+    overtime_boost = min(0.30, overdue / 3600 * 0.06)
+    chance = min(0.65, base + overtime_boost)
+    return random.random() < chance
 
 
 async def _notify_bot_attack(uid: str, p: dict, result: dict):
@@ -428,22 +444,19 @@ async def _notify_bot_attack(uid: str, p: dict, result: dict):
     failed_by_shield = bool(result.get("failed_by_shield", False))
     gold = int(result.get("gold", 0))
     elixir = int(result.get("elixir", 0))
-    shield_seconds = int(result.get("shield_seconds", 0))
-    h, m = divmod(max(0, shield_seconds) // 60, 60)
+    attacker = str(result.get("attacker", "🤖 袭击者"))
     target = mention(uid, p.get("name", "未知玩家"))
     if failed_by_shield:
         text = (
-            f"🤖 机器人突袭通知\n"
-            f"{target} 的基地遭到攻击，但护盾生效，进攻失败。\n"
+            f"⚠️ 野外袭击通知\n"
+            f"{attacker} 试图袭击 {target} 的基地，但护盾生效，进攻失败。\n"
             f"结算：⭐0  |  💰0  |  💧0"
         )
     else:
-        shield_text = f"\n🛡️ 防守护盾：{h}小时{m}分钟" if shield_seconds > 0 else ""
         text = (
-            f"🤖 机器人突袭通知\n"
-            f"{target} 的基地遭到攻击！\n"
+            f"⚠️ 野外袭击通知\n"
+            f"{attacker} 袭击了 {target} 的基地！\n"
             f"结算：{'⭐' * stars if stars > 0 else '⭐0'}  |  💰-{fmt_num(gold)}  |  💧-{fmt_num(elixir)}"
-            f"{shield_text}"
         )
     try:
         if ALLOWED_CHAT_ID:
@@ -456,18 +469,19 @@ async def _notify_bot_attack(uid: str, p: dict, result: dict):
 
 async def _execute_bot_attack(uid: str, p: dict):
     now = time.time()
+    attacker = random.choice(BOT_ATTACKER_NAMES)
     if float(p.get("shield_until", 0)) > now:
         await set_field(uid, "bot_last_attack", now)
         await add_battle_log(uid, {
             "type": "defense",
-            "opponent": "🤖 掠夺者",
+            "opponent": attacker,
             "stars": 0,
             "gold": 0,
             "elixir": 0,
             "trophies": 0,
             "time": now,
         })
-        result = {"stars": 0, "gold": 0, "elixir": 0, "shield_seconds": 0, "failed_by_shield": True}
+        result = {"stars": 0, "gold": 0, "elixir": 0, "failed_by_shield": True, "attacker": attacker}
         await _notify_bot_attack(uid, p, result)
         return
 
@@ -481,7 +495,6 @@ async def _execute_bot_attack(uid: str, p: dict):
     elixir_loot, elixir_storage_loot, elixir_collector_loot = _calc_resource_loot(
         int(p["elixir"]), pending_elixir, pct
     )
-    shield_seconds = 0
     if gold_storage_loot > 0:
         await add_gold(uid, -gold_storage_loot)
     if elixir_storage_loot > 0:
@@ -490,17 +503,11 @@ async def _execute_bot_attack(uid: str, p: dict):
         new_last = _estimate_last_collect_after_loot(p, gold_collector_loot, elixir_collector_loot)
         if new_last is not None:
             await set_field(uid, "last_collect", new_last)
-    if stars > 0:
-        shield_seconds = calc_defense_shield_seconds(p, stars)
-        shield = time.time() + shield_seconds
-        await set_field(uid, "shield_until", shield)
-        await set_field(uid, "shield_source", "defense")
-        await set_field(uid, "shield_purchase_points", 0)
-        await set_field(uid, "shield_refund_eligible", 0)
+    # 动物袭击不提供护盾；护盾只来自玩家攻击或积分购买。
     await set_field(uid, "bot_last_attack", time.time())
     await add_battle_log(uid, {
         "type": "defense",
-        "opponent": "🤖 掠夺者",
+        "opponent": attacker,
         "stars": stars,
         "gold": -int(gold_loot),
         "elixir": -int(elixir_loot),
@@ -511,40 +518,27 @@ async def _execute_bot_attack(uid: str, p: dict):
         "stars": stars,
         "gold": int(gold_loot),
         "elixir": int(elixir_loot),
-        "shield_seconds": shield_seconds,
         "failed_by_shield": False,
+        "attacker": attacker,
     }
     await _notify_bot_attack(uid, p, result)
 
 
 async def random_bot_attack_task():
-    """机器人随机时间、随机强度攻击任意玩家（护盾目标会失败并零结算）。"""
-    next_attack_at = time.time() + random.randint(60, 180)
+    """机器人按玩家独立随机进攻：每人 1.5h 内最多一次，超过后按强度概率触发。"""
     while True:
         try:
             now = time.time()
-            if now < next_attack_at:
-                await asyncio.sleep(min(15, int(next_attack_at - now)))
-                continue
-            weighted_targets = []
-            for uid in await get_all_player_uids():
+            uids = list(await get_all_player_uids())
+            random.shuffle(uids)
+            for uid in uids:
                 p = await get_player(uid)
                 if not p:
                     continue
                 elapsed = now - float(p.get("bot_last_attack", 0))
-                cooldown = _bot_target_cooldown_seconds(p)
-                if elapsed < cooldown:
+                if not _bot_should_attack_now(p, elapsed):
                     continue
-                strength = _bot_target_strength(p)
-                urgency = min(2.0, elapsed / max(cooldown, 1))
-                weight = (0.5 + 1.5 * strength) * (0.8 + 0.6 * urgency)
-                weighted_targets.append((uid, p, max(0.01, weight)))
-
-            if weighted_targets:
-                choices = [(uid, p) for uid, p, _w in weighted_targets]
-                weights = [w for _uid, _p, w in weighted_targets]
-                target_uid, target_p = random.choices(choices, weights=weights, k=1)[0]
-                await _execute_bot_attack(target_uid, target_p)
+                await _execute_bot_attack(uid, p)
         except Exception as e:
             logger.error(f"机器人随机进攻任务异常: {e}")
-        next_attack_at = time.time() + random.randint(120, 420)
+        await asyncio.sleep(60)
