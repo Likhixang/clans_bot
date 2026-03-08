@@ -93,6 +93,8 @@ async def ensure_player(uid: str, name: str) -> dict:
             await redis.hset(f"coc:{uid}", "shield_purchase_points", "0")
         if "shield_refund_eligible" not in data:
             await redis.hset(f"coc:{uid}", "shield_refund_eligible", "0")
+        if "shield_observe_hits" not in data:
+            await redis.hset(f"coc:{uid}", "shield_observe_hits", "0")
         if "bot_last_attack" not in data:
             await redis.hset(f"coc:{uid}", "bot_last_attack", "0")
         if "bot_next_attack_at" not in data:
@@ -126,6 +128,7 @@ async def init_player(uid: str, name: str) -> dict:
         "shield_source": "newbie",
         "shield_purchase_points": "0",
         "shield_refund_eligible": "0",
+        "shield_observe_hits": "0",
         "bot_last_attack": "0",
         "bot_next_attack_at": "0",
         "building_damage": "{}",
@@ -157,6 +160,7 @@ def _parse(data: dict) -> dict:
         "shield_source": data.get("shield_source", ""),
         "shield_purchase_points": round(float(data.get("shield_purchase_points", 0)), 2),
         "shield_refund_eligible": int(data.get("shield_refund_eligible", 0)),
+        "shield_observe_hits": int(data.get("shield_observe_hits", 0)),
         "bot_last_attack": float(data.get("bot_last_attack", 0)),
         "bot_next_attack_at": float(data.get("bot_next_attack_at", 0)),
         "building_damage": json.loads(data.get("building_damage", "{}")),

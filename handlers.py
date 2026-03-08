@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 AUTO_COLLECT_COST = 300
 AUTO_COLLECT_DURATION = 6 * 3600
 POINTS_SHIELD_DURATION = 6 * 3600
+OBSERVE_SHIELD_DECAY_EVERY = 3
+OBSERVE_SHIELD_DECAY_SECONDS = 30 * 60
+OBSERVE_SHIELD_MIN_REMAIN_SECONDS = 10 * 60
 
 # ───────────────────── 停机维护中间件 ─────────────────────
 
@@ -301,6 +304,37 @@ async def _break_shield_with_refund(uid: str, p: dict) -> int:
     p["shield_purchase_points"] = 0
     p["shield_refund_eligible"] = 0
     return int(refund) if refund.is_integer() else refund
+
+
+async def _apply_observe_shield_decay(target_uid: str, target_p: dict) -> tuple[int, int]:
+    """
+    观察计数规则：
+    - 目标有护盾时，观察计数+1
+    - 每累计 OBSERVE_SHIELD_DECAY_EVERY 次，扣一段护盾
+    返回 (current_hits, decay_seconds)
+    """
+    now = time.time()
+    shield_until = float(target_p.get("shield_until", 0))
+    if shield_until <= now:
+        await set_field(target_uid, "shield_observe_hits", 0)
+        target_p["shield_observe_hits"] = 0
+        return 0, 0
+
+    hits = int(target_p.get("shield_observe_hits", 0)) + 1
+    decay_seconds = 0
+    if hits >= OBSERVE_SHIELD_DECAY_EVERY:
+        hits = 0
+        remain = max(0, int(shield_until - now))
+        if remain > OBSERVE_SHIELD_MIN_REMAIN_SECONDS:
+            max_cut = remain - OBSERVE_SHIELD_MIN_REMAIN_SECONDS
+            decay_seconds = min(OBSERVE_SHIELD_DECAY_SECONDS, max_cut)
+            new_until = shield_until - decay_seconds
+            await set_field(target_uid, "shield_until", new_until)
+            target_p["shield_until"] = new_until
+
+    await set_field(target_uid, "shield_observe_hits", hits)
+    target_p["shield_observe_hits"] = hits
+    return hits, decay_seconds
 
 
 async def _repair_defense_buildings(uid: str, p: dict, bids: list[str]) -> tuple[int, list[str]]:
@@ -3017,12 +3051,17 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             "target_data": target_p,
             "troops": {},
         }
+        _hits, decay_seconds = await _apply_observe_shield_decay(target_uid, target_p)
         text, kb = _render_troop_panel(uid, p)
         try:
             await cb.message.edit_text(text, reply_markup=kb)
         except Exception:
             pass
-        await cb.answer()
+        if decay_seconds > 0:
+            h, m = divmod(decay_seconds // 60, 60)
+            await cb.answer(f"👁️ 侦察生效：目标护盾 -{h}小时{m}分钟", show_alert=False)
+        else:
+            await cb.answer()
 
     elif action == "atkrt":
         # 回复目标二次确认后：直接进入出兵面板
@@ -3038,12 +3077,17 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             "target_data": target_p,
             "troops": {},
         }
+        _hits, decay_seconds = await _apply_observe_shield_decay(target_uid, target_p)
         text, kb = _render_troop_panel(uid, p)
         try:
             await cb.message.edit_text(text, reply_markup=kb)
         except Exception:
             pass
-        await cb.answer("✅ 已锁定目标")
+        if decay_seconds > 0:
+            h, m = divmod(decay_seconds // 60, 60)
+            await cb.answer(f"✅ 已锁定目标；👁️ 护盾 -{h}小时{m}分钟")
+        else:
+            await cb.answer("✅ 已锁定目标")
 
     elif action == "asel":
         # 调整兵种数量 vm:asel:{tid}:{delta}:{uid}
