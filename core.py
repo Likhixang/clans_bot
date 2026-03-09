@@ -1,6 +1,7 @@
 import os
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from redis.asyncio import Redis
 
 from config import (
@@ -11,7 +12,11 @@ from config import (
     POINTS_REDIS_PASSWORD,
 )
 
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode='HTML'),
+    session=AiohttpSession(timeout=12),
+)
 dp = Dispatcher()
 redis = Redis(host='redis', port=6379, db=0, decode_responses=True, password=os.getenv('REDIS_PASSWORD'))
 

@@ -6,6 +6,7 @@ import re
 import time
 
 from aiogram import Router, types, F, BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import Callable, Any, Dict, Awaitable
@@ -100,8 +101,30 @@ class MaintenanceMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class TelegramResilienceMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: Dict[str, Any],
+    ) -> Any:
+        try:
+            return await handler(event, data)
+        except TelegramNetworkError as e:
+            logger.warning("[tg_resilience] network timeout: %s", e)
+            return
+        except TelegramBadRequest as e:
+            msg = str(e).lower()
+            if "query is too old" in msg or "query id is invalid" in msg or "message is not modified" in msg:
+                logger.info("[tg_resilience] ignore bad request: %s", e)
+                return
+            raise
+
+
 router.message.middleware(MaintenanceMiddleware())
 router.callback_query.middleware(MaintenanceMiddleware())
+router.message.middleware(TelegramResilienceMiddleware())
+router.callback_query.middleware(TelegramResilienceMiddleware())
 
 # ───────────────────── 村庄可视化 ─────────────────────
 
@@ -2159,6 +2182,10 @@ async def cmd_maintain(msg: types.Message):
         f"维护完成后将置顶「停机补偿」公告并发放补偿资源，感谢耐心等待！"
     )
     announce = await send(chat_id, body)
+    if not announce:
+        logger.warning("[maintenance] 维护公告发送失败，跳过置顶")
+        asyncio.create_task(auto_delete([msg], 0))
+        return
     try:
         await pin_in_topic(chat_id, announce.message_id, disable_notification=False)
     except Exception as e:
@@ -2228,6 +2255,9 @@ async def cmd_compensate(msg: types.Message):
     )
 
     announce = await send(chat_id, body)
+    if not announce:
+        logger.warning("[compensate] 补偿公告发送失败，跳过置顶")
+        return
     try:
         await pin_in_topic(chat_id, announce.message_id, disable_notification=False)
     except Exception:

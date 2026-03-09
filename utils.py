@@ -1,7 +1,9 @@
 import asyncio
 import html
+import logging
 
 from aiogram import types
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.methods import PinChatMessage
 
 from core import bot
@@ -30,12 +32,45 @@ async def auto_delete(msgs: list, delay: int = 15):
             pass
 
 
-async def send(chat_id: int, text: str, reply_markup=None, delay_delete: int = 0):
-    msg = await bot.send_message(
-        chat_id, text,
-        reply_markup=reply_markup,
-        message_thread_id=thread_id(),
+def _is_ignorable_bad_request(err: TelegramBadRequest) -> bool:
+    msg = str(err).lower()
+    return (
+        "query is too old" in msg
+        or "query id is invalid" in msg
+        or "message is not modified" in msg
     )
+
+
+async def safe_tg_call(coro_factory, *, retries: int = 1, retry_delay: float = 0.4, op: str = "tg_call"):
+    attempt = 0
+    while True:
+        try:
+            return await coro_factory()
+        except TelegramNetworkError as e:
+            if attempt >= retries:
+                logging.warning("[%s] Telegram network error: %s", op, e)
+                return None
+            attempt += 1
+            await asyncio.sleep(retry_delay)
+        except TelegramBadRequest as e:
+            if _is_ignorable_bad_request(e):
+                logging.info("[%s] Ignore Telegram bad request: %s", op, e)
+                return None
+            raise
+
+
+async def send(chat_id: int, text: str, reply_markup=None, delay_delete: int = 0):
+    msg = await safe_tg_call(
+        lambda: bot.send_message(
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+            message_thread_id=thread_id(),
+        ),
+        op="send_message",
+    )
+    if not msg:
+        return None
     if delay_delete > 0:
         asyncio.create_task(auto_delete([msg], delay_delete))
     return msg
