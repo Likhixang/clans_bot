@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 AUTO_COLLECT_COST = 300
 AUTO_COLLECT_DURATION = 6 * 3600
 POINTS_SHIELD_DURATION = 6 * 3600
+ATTACK_BOT_PENALTY_GOLD = 1000
+OBSERVE_COST_GOLD = 100
 OBSERVE_SHIELD_DECAY_EVERY = 3
 OBSERVE_SHIELD_DECAY_SECONDS = 30 * 60
 OBSERVE_SHIELD_MIN_REMAIN_SECONDS = 10 * 60
@@ -280,6 +282,19 @@ def _shield_status_text(p: dict) -> str:
     return f"🛡️ 护盾: 已开启（剩余 {h}小时{m}分钟）"
 
 
+def _attack_panel_shield_tag(target_p: dict, now_ts: float | None = None) -> str:
+    now = time.time() if now_ts is None else float(now_ts)
+    remain = int(max(0, float(target_p.get("shield_until", 0)) - now))
+    if remain <= 0:
+        return "✅可进攻"
+    if remain < 60:
+        return f"🛡️{remain}秒"
+    h, m = divmod(remain // 60, 60)
+    if h > 0:
+        return f"🛡️{h}小时{m}分钟"
+    return f"🛡️{m}分钟"
+
+
 def _calc_break_shield_refund_preview(p: dict, now_ts: float | None = None) -> int:
     now = time.time() if now_ts is None else float(now_ts)
     if float(p.get("shield_until", 0)) <= now:
@@ -348,6 +363,15 @@ async def _apply_observe_shield_decay(target_uid: str, target_p: dict) -> tuple[
     await set_field(target_uid, "shield_observe_hits", hits)
     target_p["shield_observe_hits"] = hits
     return hits, decay_seconds
+
+
+async def _consume_observe_gold(uid: str, p: dict) -> bool:
+    """侦察前扣费：无论后续是否进攻，只要侦察即扣金币。"""
+    if not _has_enough_resource(p.get("gold", 0), OBSERVE_COST_GOLD):
+        return False
+    await add_gold(uid, -OBSERVE_COST_GOLD)
+    p["gold"] = round(float(p.get("gold", 0)) - OBSERVE_COST_GOLD, 2)
+    return True
 
 
 async def _repair_defense_buildings(uid: str, p: dict, bids: list[str]) -> tuple[int, list[str]]:
@@ -1395,6 +1419,27 @@ async def cmd_attack(msg: types.Message):
         return
     uid, name = _uid(msg), _name(msg)
     p = await ensure_player(uid, name)
+    reply_user = msg.reply_to_message.from_user if msg.reply_to_message else None
+    if not reply_user:
+        await msg.reply("❌ 请先回复一名玩家的消息再使用 /clan_attack")
+        return
+    if reply_user.is_bot:
+        penalty = min(int(float(p.get("gold", 0))), ATTACK_BOT_PENALTY_GOLD)
+        if penalty > 0:
+            await add_gold(uid, -penalty)
+            p["gold"] = round(float(p.get("gold", 0)) - penalty, 2)
+        await msg.reply(
+            f"🚫 你试图攻击机器人，处罚 💰{fmt_num(penalty)}（规则罚款 💰{fmt_num(ATTACK_BOT_PENALTY_GOLD)}）"
+        )
+        return
+    reply_target_uid: str | None = None
+    target_uid = str(reply_user.id)
+    target = await get_player(target_uid)
+    block_reason = _attack_block_reason(uid, p, target_uid, target)
+    if block_reason:
+        await msg.reply(block_reason)
+        return
+    reply_target_uid = target_uid
 
     # 冷却检查
     last = _attack_locks.get(uid, 0)
@@ -1410,25 +1455,24 @@ async def cmd_attack(msg: types.Message):
         extra = ""
         if p.get("shield_source") == "purchased" and int(p.get("shield_refund_eligible", 0)) == 1:
             extra = f"\n打断并进攻预计返还：🪙{fmt_num(_calc_break_shield_refund_preview(p))}"
+        cb_data = f"break_shield_{uid}"
+        if reply_target_uid:
+            cb_data = f"break_shield_{uid}_{reply_target_uid}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚔️ 放弃护盾并攻击", callback_data=f"break_shield_{uid}")]
+            [InlineKeyboardButton(text="⚔️ 放弃护盾并攻击", callback_data=cb_data)]
         ])
+        direct_tip = "\n将直接对你回复的目标发起进攻。" if reply_target_uid else ""
         await msg.reply(
             f"🛡️ 你有护盾保护（剩余 {h}小时{m}分钟）\n"
-            f"攻击将会移除护盾！{extra}",
+            f"攻击将会移除护盾！{extra}{direct_tip}",
             reply_markup=kb,
         )
         return
 
-    # 回复某位玩家时：直接指向该玩家基地（机器人除外），需要二次确认
-    reply_user = msg.reply_to_message.from_user if msg.reply_to_message else None
-    if reply_user and not reply_user.is_bot:
-        target_uid = str(reply_user.id)
+    # 已确保为回复真人玩家：直接指向该玩家基地，需要二次确认
+    if reply_target_uid:
+        target_uid = reply_target_uid
         target = await get_player(target_uid)
-        block_reason = _attack_block_reason(uid, p, target_uid, target)
-        if block_reason:
-            await msg.reply(block_reason)
-            return
         target_name = target["name"]
         th_lv = target["buildings"].get("town_hall", 1)
         defense = get_defense_power(target)
@@ -1457,15 +1501,56 @@ async def cmd_attack(msg: types.Message):
 
 @router.callback_query(F.data.startswith("break_shield_"))
 async def cb_break_shield(cb: types.CallbackQuery):
-    target_uid = cb.data.split("_")[-1]
-    if str(cb.from_user.id) != target_uid:
+    payload = cb.data.removeprefix("break_shield_")
+    parts = payload.split("_", 1)
+    owner_uid = parts[0]
+    forced_target_uid = parts[1] if len(parts) > 1 and parts[1] else None
+    if str(cb.from_user.id) != owner_uid:
         await cb.answer("这不是你的操作！", show_alert=True)
         return
-    uid = target_uid
+    uid = owner_uid
     name = cb.from_user.full_name or cb.from_user.username or "无名"
     p = await ensure_player(uid, name)
 
     refund = await _break_shield_with_refund(uid, p)
+    if forced_target_uid:
+        if not any(v > 0 for v in p["troops"].values()):
+            await cb.message.edit_text("❌ 你没有部队！先使用 /clan_train 训练部队")
+            await cb.answer()
+            return
+        target_p = await get_player(forced_target_uid)
+        block_reason = _attack_block_reason(uid, p, forced_target_uid, target_p)
+        if block_reason:
+            await cb.message.edit_text(block_reason)
+            await cb.answer()
+            return
+        if float(target_p.get("shield_until", 0)) > time.time():
+            await cb.message.edit_text("❌ 对方已有护盾保护，本次发起失败")
+            await cb.answer()
+            return
+        if not await _consume_observe_gold(uid, p):
+            await cb.message.edit_text(f"❌ 侦察需要 💰{fmt_num(OBSERVE_COST_GOLD)}，金币不足")
+            await cb.answer()
+            return
+        _attack_staging[uid] = {
+            "target_uid": forced_target_uid,
+            "target_name": target_p["name"],
+            "target_data": target_p,
+            "troops": {},
+        }
+        _hits, decay_seconds = await _apply_observe_shield_decay(forced_target_uid, target_p)
+        text, kb = _render_troop_panel(uid, p)
+        await cb.message.edit_text(text, reply_markup=kb)
+        if decay_seconds > 0:
+            h, m = divmod(decay_seconds // 60, 60)
+            tip = f"✅ 已破盾并锁定目标，已扣💰{fmt_num(OBSERVE_COST_GOLD)}；👁️ 护盾 -{h}小时{m}分钟"
+        else:
+            tip = f"✅ 已破盾并锁定目标，已扣💰{fmt_num(OBSERVE_COST_GOLD)}"
+        if refund > 0:
+            tip = f"已返还🪙{fmt_num(refund)}；{tip}"
+        await cb.answer(tip, show_alert=False)
+        return
+
     tip = "🛡️ → ⚔️ 护盾已移除！正在搜索对手..."
     if refund > 0:
         tip = f"🛡️ → ⚔️ 护盾已移除，已返还 🪙{fmt_num(refund)}！正在搜索对手..."
@@ -1487,12 +1572,13 @@ async def _do_attack(msg: types.Message, uid: str, name: str, p: dict):
 
     lines = ["⚔️ <b>选择攻击目标</b>\n"]
     btns = []
+    now_ts = time.time()
     for t_uid, t_p in targets:
         th_lv = t_p["buildings"].get("town_hall", 1)
         defense = get_defense_power(t_p)
         total_res = t_p["gold"] + t_p["elixir"]
-        shield_on = float(t_p.get("shield_until", 0)) > time.time()
-        shield_tag = "🛡️护盾中" if shield_on else "✅可进攻"
+        shield_on = float(t_p.get("shield_until", 0)) > now_ts
+        shield_tag = _attack_panel_shield_tag(t_p, now_ts=now_ts)
         lines.append(
             f"• {safe_html(t_p['name'])} | 🏰Lv.{th_lv} | "
             f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | {shield_tag} | "
@@ -3059,31 +3145,8 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         if block_reason:
             await cb.answer(block_reason, show_alert=True)
             return
-        _attack_staging[uid] = {
-            "target_uid": target_uid,
-            "target_name": target_p["name"],
-            "target_data": target_p,
-            "troops": {},
-        }
-        _hits, decay_seconds = await _apply_observe_shield_decay(target_uid, target_p)
-        text, kb = _render_troop_panel(uid, p)
-        try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            pass
-        if decay_seconds > 0:
-            h, m = divmod(decay_seconds // 60, 60)
-            await cb.answer(f"👁️ 侦察生效：目标护盾 -{h}小时{m}分钟", show_alert=False)
-        else:
-            await cb.answer()
-
-    elif action == "atkrt":
-        # 回复目标二次确认后：直接进入出兵面板
-        target_uid = parts[2]
-        target_p = await get_player(target_uid)
-        block_reason = _attack_block_reason(uid, p, target_uid, target_p)
-        if block_reason:
-            await cb.answer(block_reason, show_alert=True)
+        if not await _consume_observe_gold(uid, p):
+            await cb.answer(f"❌ 侦察需要 💰{fmt_num(OBSERVE_COST_GOLD)}，金币不足", show_alert=True)
             return
         _attack_staging[uid] = {
             "target_uid": target_uid,
@@ -3099,9 +3162,43 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             pass
         if decay_seconds > 0:
             h, m = divmod(decay_seconds // 60, 60)
-            await cb.answer(f"✅ 已锁定目标；👁️ 护盾 -{h}小时{m}分钟")
+            await cb.answer(
+                f"👁️ 已扣💰{fmt_num(OBSERVE_COST_GOLD)}；侦察生效：目标护盾 -{h}小时{m}分钟",
+                show_alert=False,
+            )
         else:
-            await cb.answer("✅ 已锁定目标")
+            await cb.answer(f"👁️ 已扣💰{fmt_num(OBSERVE_COST_GOLD)}")
+
+    elif action == "atkrt":
+        # 回复目标二次确认后：直接进入出兵面板
+        target_uid = parts[2]
+        target_p = await get_player(target_uid)
+        block_reason = _attack_block_reason(uid, p, target_uid, target_p)
+        if block_reason:
+            await cb.answer(block_reason, show_alert=True)
+            return
+        if not await _consume_observe_gold(uid, p):
+            await cb.answer(f"❌ 侦察需要 💰{fmt_num(OBSERVE_COST_GOLD)}，金币不足", show_alert=True)
+            return
+        _attack_staging[uid] = {
+            "target_uid": target_uid,
+            "target_name": target_p["name"],
+            "target_data": target_p,
+            "troops": {},
+        }
+        _hits, decay_seconds = await _apply_observe_shield_decay(target_uid, target_p)
+        text, kb = _render_troop_panel(uid, p)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        if decay_seconds > 0:
+            h, m = divmod(decay_seconds // 60, 60)
+            await cb.answer(
+                f"✅ 已锁定目标，已扣💰{fmt_num(OBSERVE_COST_GOLD)}；👁️ 护盾 -{h}小时{m}分钟"
+            )
+        else:
+            await cb.answer(f"✅ 已锁定目标，已扣💰{fmt_num(OBSERVE_COST_GOLD)}")
 
     elif action == "asel":
         # 调整兵种数量 vm:asel:{tid}:{delta}:{uid}
@@ -3493,12 +3590,13 @@ async def _do_attack_inline(cb: types.CallbackQuery, uid: str, name: str, p: dic
 
     lines = ["⚔️ <b>选择攻击目标</b>\n"]
     btns = []
+    now_ts = time.time()
     for t_uid, t_p in targets:
         th_lv = t_p["buildings"].get("town_hall", 1)
         defense = get_defense_power(t_p)
         total_res = t_p["gold"] + t_p["elixir"]
-        shield_on = float(t_p.get("shield_until", 0)) > time.time()
-        shield_tag = "🛡️护盾中" if shield_on else "✅可进攻"
+        shield_on = float(t_p.get("shield_until", 0)) > now_ts
+        shield_tag = _attack_panel_shield_tag(t_p, now_ts=now_ts)
         lines.append(
             f"• {safe_html(t_p['name'])} | 🏰Lv.{th_lv} | "
             f"🏆{t_p['trophies']} | 🛡️{fmt_num(defense)} | {shield_tag} | "
