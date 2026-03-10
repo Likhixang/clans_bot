@@ -106,10 +106,12 @@ class ScopeGuardMiddleware(BaseMiddleware):
         if not text.startswith("/clan_"):
             return await handler(event, data)
         if ALLOWED_CHAT_ID and event.chat.id != ALLOWED_CHAT_ID:
-            await event.reply(OUT_OF_SCOPE_TIP)
+            tip = await event.reply(OUT_OF_SCOPE_TIP)
+            asyncio.create_task(auto_delete([event, tip], 10))
             return
         if ALLOWED_THREAD_ID and event.message_thread_id != ALLOWED_THREAD_ID:
-            await event.reply(OUT_OF_SCOPE_TIP)
+            tip = await event.reply(OUT_OF_SCOPE_TIP)
+            asyncio.create_task(auto_delete([event, tip], 10))
             return
         return await handler(event, data)
 
@@ -3827,4 +3829,5 @@ async def cmd_unknown_clan(msg: types.Message):
         return
     if not _check(msg):
         return
-    await msg.reply("❌ 未知命令，输入 /clan_help 查看可用命令。")
+    tip = await msg.reply("❌ 未知命令，输入 /clan_help 查看可用命令。")
+    asyncio.create_task(auto_delete([msg, tip], 10))
