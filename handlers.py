@@ -58,6 +58,28 @@ _ADMIN_COMMANDS = {
     "clan_backup_db",
     "clan_restore_db",
 }
+OUT_OF_SCOPE_TIP = "❌ 本 bot 仅在🛡️部落话题提供服务。"
+
+
+class ScopeGuardMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: Dict[str, Any],
+    ) -> Any:
+        if not isinstance(event, types.Message):
+            return await handler(event, data)
+        text = (event.text or "").strip()
+        if not text.startswith("/clan_"):
+            return await handler(event, data)
+        if ALLOWED_CHAT_ID and event.chat.id != ALLOWED_CHAT_ID:
+            await event.reply(OUT_OF_SCOPE_TIP)
+            return
+        if ALLOWED_THREAD_ID and event.message_thread_id != ALLOWED_THREAD_ID:
+            await event.reply(OUT_OF_SCOPE_TIP)
+            return
+        return await handler(event, data)
 
 
 class MaintenanceMiddleware(BaseMiddleware):
@@ -121,6 +143,7 @@ class TelegramResilienceMiddleware(BaseMiddleware):
             raise
 
 
+router.message.middleware(ScopeGuardMiddleware())
 router.message.middleware(MaintenanceMiddleware())
 router.callback_query.middleware(MaintenanceMiddleware())
 router.message.middleware(TelegramResilienceMiddleware())
