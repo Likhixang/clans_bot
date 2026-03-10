@@ -58,6 +58,38 @@ _ADMIN_COMMANDS = {
     "clan_backup_db",
     "clan_restore_db",
 }
+KNOWN_CLAN_COMMANDS = {
+    "clan_start",
+    "clan_me",
+    "clan_collect",
+    "clan_auto",
+    "clan_shield",
+    "clan_repair",
+    "clan_buy",
+    "clan_swap",
+    "clan_sell",
+    "clan_shop",
+    "clan_build",
+    "clan_upgrade",
+    "clan_troops",
+    "clan_train",
+    "clan_army",
+    "clan_attack",
+    "clan_log",
+    "clan_rank",
+    "clan_create",
+    "clan_info",
+    "clan_list",
+    "clan_join",
+    "clan_leave",
+    "clan_help",
+    "clan_give",
+    "clan_take",
+    "clan_maintain",
+    "clan_compensate",
+    "clan_backup_db",
+    "clan_restore_db",
+}
 OUT_OF_SCOPE_TIP = "❌ 本 bot 仅在🛡️部落话题提供服务。"
 
 
@@ -3785,3 +3817,14 @@ def _render_troop_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
 
     kb = InlineKeyboardMarkup(inline_keyboard=btns)
     return "\n".join(lines), kb
+
+
+@router.message(F.text.regexp(r"^/clan_[A-Za-z0-9_@]+"))
+async def cmd_unknown_clan(msg: types.Message):
+    token = ((msg.text or "").strip().split() or [""])[0]
+    cmd = token.lstrip("/").split("@", 1)[0]
+    if cmd in KNOWN_CLAN_COMMANDS:
+        return
+    if not _check(msg):
+        return
+    await msg.reply("❌ 未知命令，输入 /clan_help 查看可用命令。")
