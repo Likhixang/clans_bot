@@ -2044,12 +2044,18 @@ def _is_admin(uid: str) -> bool:
     return uid_int == SUPER_ADMIN_ID or uid_int in ADMIN_IDS
 
 
+async def _deny_unauthorized(msg: types.Message):
+    tip = await msg.reply("❌ 越权拦截")
+    asyncio.create_task(auto_delete([msg, tip], 10))
+
+
 @router.message(Command("clan_give"))
 async def cmd_give(msg: types.Message):
     if not _check(msg):
         return
     uid = _uid(msg)
     if int(uid) != SUPER_ADMIN_ID:
+        await _deny_unauthorized(msg)
         return
 
     args = msg.text.split()
@@ -2084,6 +2090,7 @@ async def cmd_take(msg: types.Message):
         return
     uid = _uid(msg)
     if int(uid) != SUPER_ADMIN_ID:
+        await _deny_unauthorized(msg)
         return
 
     args = msg.text.split()
@@ -2117,6 +2124,7 @@ async def cmd_backup_db(msg: types.Message):
     if not _check(msg):
         return
     if msg.from_user.id != SUPER_ADMIN_ID:
+        await _deny_unauthorized(msg)
         return
     stats = await perform_backup()
     latest = stats.get("backup_file") or get_latest_backup_path() or "无"
@@ -2135,6 +2143,7 @@ async def cmd_restore_db(msg: types.Message):
     if not _check(msg):
         return
     if msg.from_user.id != SUPER_ADMIN_ID:
+        await _deny_unauthorized(msg)
         return
     markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="⚠️ 确认覆盖恢复", callback_data="clan_confirm_restore"),
@@ -2207,6 +2216,7 @@ async def cmd_maintain(msg: types.Message):
     if not _check(msg):
         return
     if msg.from_user.id != SUPER_ADMIN_ID:
+        await _deny_unauthorized(msg)
         return
 
     chat_id = msg.chat.id
@@ -2259,6 +2269,7 @@ async def cmd_compensate(msg: types.Message):
     if not _check(msg):
         return
     if msg.from_user.id != SUPER_ADMIN_ID:
+        await _deny_unauthorized(msg)
         return
 
     chat_id = msg.chat.id
