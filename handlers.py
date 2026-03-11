@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import logging
+import random
 import re
 import time
 
@@ -47,8 +48,8 @@ POINTS_SHIELD_DURATION = 6 * 3600
 ATTACK_BOT_PENALTY_GOLD = 1000
 OBSERVE_COST_GOLD = 100
 OBSERVE_SHIELD_DECAY_EVERY = 3
-OBSERVE_SHIELD_DECAY_SECONDS = 30 * 60
 OBSERVE_SHIELD_MIN_REMAIN_SECONDS = 10 * 60
+OBSERVE_MAX_PER_SHIELD_PER_USER = 3
 
 # ───────────────────── 停机维护中间件 ─────────────────────
 
@@ -409,6 +410,7 @@ async def _break_shield_with_refund(uid: str, p: dict) -> int:
     await set_field(uid, "shield_source", "")
     await set_field(uid, "shield_purchase_points", "0")
     await set_field(uid, "shield_refund_eligible", "0")
+    await redis.delete(f"coc:shield_token:{uid}")
     p["shield_until"] = 0
     p["shield_source"] = ""
     p["shield_purchase_points"] = 0
@@ -416,7 +418,58 @@ async def _break_shield_with_refund(uid: str, p: dict) -> int:
     return int(refund)
 
 
-async def _apply_observe_shield_decay(target_uid: str, target_p: dict) -> tuple[int, int]:
+async def _rotate_shield_token(uid: str, shield_until: float | int) -> str:
+    now = time.time()
+    token = f"{int(now)}-{random.randint(100000, 999999)}"
+    ttl = max(3600, int(max(0.0, float(shield_until) - now)) + 24 * 3600)
+    await redis.set(f"coc:shield_token:{uid}", token, ex=ttl)
+    return token
+
+
+async def _ensure_active_shield_token(target_uid: str, target_p: dict, now_ts: float | None = None) -> str:
+    now = time.time() if now_ts is None else float(now_ts)
+    shield_until = float(target_p.get("shield_until", 0))
+    if shield_until <= now:
+        return ""
+    token_key = f"coc:shield_token:{target_uid}"
+    token = await redis.get(token_key)
+    if token:
+        return str(token)
+    return await _rotate_shield_token(target_uid, shield_until)
+
+
+def _shield_observe_count_key(target_uid: str, shield_token: str) -> str:
+    return f"coc:shield_obs:{target_uid}:{shield_token}"
+
+
+async def _can_observe_target_during_shield(observer_uid: str, target_uid: str, target_p: dict) -> bool:
+    now = time.time()
+    shield_until = float(target_p.get("shield_until", 0))
+    if shield_until <= now:
+        return True
+    token = await _ensure_active_shield_token(target_uid, target_p, now_ts=now)
+    if not token:
+        return True
+    used = int(await redis.hget(_shield_observe_count_key(target_uid, token), observer_uid) or 0)
+    return used < OBSERVE_MAX_PER_SHIELD_PER_USER
+
+
+async def _mark_observe_usage(observer_uid: str, target_uid: str, target_p: dict) -> tuple[int, str]:
+    now = time.time()
+    shield_until = float(target_p.get("shield_until", 0))
+    if shield_until <= now:
+        return 0, ""
+    token = await _ensure_active_shield_token(target_uid, target_p, now_ts=now)
+    if not token:
+        return 0, ""
+    key = _shield_observe_count_key(target_uid, token)
+    used = int(await redis.hincrby(key, observer_uid, 1))
+    ttl = max(3600, int(max(0.0, shield_until - now)) + 24 * 3600)
+    await redis.expire(key, ttl)
+    return used, key
+
+
+async def _apply_observe_shield_decay(observer_uid: str, target_uid: str, target_p: dict) -> tuple[int, int]:
     """
     观察计数规则：
     - 目标有护盾时，观察计数+1
@@ -429,6 +482,11 @@ async def _apply_observe_shield_decay(target_uid: str, target_p: dict) -> tuple[
         await set_field(target_uid, "shield_observe_hits", 0)
         target_p["shield_observe_hits"] = 0
         return 0, 0
+    used, usage_key = await _mark_observe_usage(observer_uid, target_uid, target_p)
+    if used > OBSERVE_MAX_PER_SHIELD_PER_USER:
+        if usage_key:
+            await redis.hincrby(usage_key, observer_uid, -1)
+        return int(target_p.get("shield_observe_hits", 0)), 0
 
     hits = int(target_p.get("shield_observe_hits", 0)) + 1
     decay_seconds = 0
@@ -437,7 +495,13 @@ async def _apply_observe_shield_decay(target_uid: str, target_p: dict) -> tuple[
         remain = max(0, int(shield_until - now))
         if remain > OBSERVE_SHIELD_MIN_REMAIN_SECONDS:
             max_cut = remain - OBSERVE_SHIELD_MIN_REMAIN_SECONDS
-            decay_seconds = min(OBSERVE_SHIELD_DECAY_SECONDS, max_cut)
+            th_lv = int(target_p.get("buildings", {}).get("town_hall", 1))
+            th_step = max(0, th_lv - 1)
+            min_cut = 10 * 60 + th_step * 2 * 60
+            max_cut_pref = 25 * 60 + th_step * 4 * 60
+            if max_cut_pref < min_cut:
+                max_cut_pref = min_cut
+            decay_seconds = min(max_cut, random.randint(min_cut, max_cut_pref))
             new_until = shield_until - decay_seconds
             await set_field(target_uid, "shield_until", new_until)
             target_p["shield_until"] = new_until
@@ -1027,6 +1091,7 @@ async def cmd_shield(msg: types.Message):
     await set_field(uid, "shield_source", "purchased")
     await set_field(uid, "shield_purchase_points", shield_cost)
     await set_field(uid, "shield_refund_eligible", 1)
+    await _rotate_shield_token(uid, until)
     remain = int(POINTS_SHIELD_DURATION)
     h, m = divmod(remain // 60, 60)
     await msg.reply(
@@ -1699,6 +1764,10 @@ async def cb_break_shield(cb: types.CallbackQuery):
             await cb.message.edit_text("❌ 对方已有护盾保护，本次发起失败")
             await cb.answer()
             return
+        if not await _can_observe_target_during_shield(uid, forced_target_uid, target_p):
+            await cb.message.edit_text("❌ 对方本轮护盾期间，你最多只能观察 3 次。请等对方下次护盾。")
+            await cb.answer()
+            return
         if not await _consume_observe_gold(uid, p):
             await cb.message.edit_text(f"❌ 侦察需要 💰{fmt_num(OBSERVE_COST_GOLD)}，金币不足")
             await cb.answer()
@@ -1709,7 +1778,7 @@ async def cb_break_shield(cb: types.CallbackQuery):
             "target_data": target_p,
             "troops": {},
         }
-        _hits, decay_seconds = await _apply_observe_shield_decay(forced_target_uid, target_p)
+        _hits, decay_seconds = await _apply_observe_shield_decay(uid, forced_target_uid, target_p)
         text, kb = _render_troop_panel(uid, p)
         await cb.message.edit_text(text, reply_markup=kb)
         if decay_seconds > 0:
@@ -2553,6 +2622,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         await set_field(uid, "shield_source", "purchased")
         await set_field(uid, "shield_purchase_points", shield_cost)
         await set_field(uid, "shield_refund_eligible", 1)
+        await _rotate_shield_token(uid, until)
         p["points"] = round(float(p["points"]) - shield_cost, 2)
         p["shield_until"] = until
         p["shield_source"] = "purchased"
@@ -3432,6 +3502,9 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         if block_reason:
             await cb.answer(block_reason, show_alert=True)
             return
+        if not await _can_observe_target_during_shield(uid, target_uid, target_p):
+            await cb.answer("❌ 对方本轮护盾期间，你最多只能观察 3 次。请等对方下次护盾。", show_alert=True)
+            return
         if not await _consume_observe_gold(uid, p):
             await cb.answer(f"❌ 侦察需要 💰{fmt_num(OBSERVE_COST_GOLD)}，金币不足", show_alert=True)
             return
@@ -3441,7 +3514,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             "target_data": target_p,
             "troops": {},
         }
-        _hits, decay_seconds = await _apply_observe_shield_decay(target_uid, target_p)
+        _hits, decay_seconds = await _apply_observe_shield_decay(uid, target_uid, target_p)
         text, kb = _render_troop_panel(uid, p)
         try:
             await cb.message.edit_text(text, reply_markup=kb)
@@ -3464,6 +3537,9 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         if block_reason:
             await cb.answer(block_reason, show_alert=True)
             return
+        if not await _can_observe_target_during_shield(uid, target_uid, target_p):
+            await cb.answer("❌ 对方本轮护盾期间，你最多只能观察 3 次。请等对方下次护盾。", show_alert=True)
+            return
         if not await _consume_observe_gold(uid, p):
             await cb.answer(f"❌ 侦察需要 💰{fmt_num(OBSERVE_COST_GOLD)}，金币不足", show_alert=True)
             return
@@ -3473,7 +3549,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             "target_data": target_p,
             "troops": {},
         }
-        _hits, decay_seconds = await _apply_observe_shield_decay(target_uid, target_p)
+        _hits, decay_seconds = await _apply_observe_shield_decay(uid, target_uid, target_p)
         text, kb = _render_troop_panel(uid, p)
         try:
             await cb.message.edit_text(text, reply_markup=kb)

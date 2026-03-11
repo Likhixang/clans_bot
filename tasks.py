@@ -448,20 +448,39 @@ async def auto_collect_task():
 
 
 def _shield_decay_rate_per_hour(p: dict) -> float:
-    """返回每小时额外衰减秒数。"""
+    """返回每小时额外衰减秒数（随机，且大本营越高越快）。"""
     th_lv = int(p.get("buildings", {}).get("town_hall", 1))
     threshold = SHIELD_DECAY_THRESHOLD_BASE + th_lv * SHIELD_DECAY_THRESHOLD_PER_TH
     threshold = max(1.0, float(threshold))
     loot_total = float(int(p.get("gold", 0)) + int(p.get("elixir", 0)))
     loot_total += float(_pending_collectable(p, "gold") + _pending_collectable(p, "elixir"))
     ratio = loot_total / threshold
+    th_boost = min(2.2, 1.0 + max(0, th_lv - 1) * 0.08)
     if ratio >= 2.0:
-        return float(SHIELD_DECAY_RATE_HIGH)
+        base = float(SHIELD_DECAY_RATE_HIGH)
+        return random.uniform(base * 0.8, base * 1.3) * th_boost
     if ratio >= 1.5:
-        return float(SHIELD_DECAY_RATE_MID)
+        base = float(SHIELD_DECAY_RATE_MID)
+        return random.uniform(base * 0.75, base * 1.25) * th_boost
     if ratio >= 1.0:
-        return float(SHIELD_DECAY_RATE_LOW)
+        base = float(SHIELD_DECAY_RATE_LOW)
+        return random.uniform(base * 0.7, base * 1.2) * th_boost
     return 0.0
+
+
+def _bot_attack_shield_cut_seconds(p: dict, remaining: float) -> int:
+    """野外袭击命中护盾时的随机减盾（大本营越高，扣得越多）。"""
+    th_lv = int(p.get("buildings", {}).get("town_hall", 1))
+    th_step = max(0, th_lv - 1)
+    min_ratio = min(0.65, 0.20 + th_step * 0.025)
+    max_ratio = min(0.90, 0.35 + th_step * 0.03)
+    if max_ratio < min_ratio:
+        max_ratio = min_ratio
+    ratio = random.uniform(min_ratio, max_ratio)
+    cut_seconds = int(max(0.0, remaining * ratio))
+    if remaining >= 60:
+        cut_seconds = max(60, cut_seconds)
+    return min(int(remaining), cut_seconds)
 
 
 async def shield_decay_task():
@@ -616,7 +635,7 @@ async def _notify_bot_attack(uid: str, p: dict, result: dict):
         cut_text = ""
         if shield_cut_seconds > 0:
             h, m = divmod(shield_cut_seconds // 60, 60)
-            cut_text = f"\n护盾惩罚：🛡️ -{h}小时{m}分钟（剩余时间减半）"
+            cut_text = f"\n护盾惩罚：🛡️ -{h}小时{m}分钟"
         text = (
             f"⚠️ 野外袭击通知\n"
             f"{attacker} 试图袭击 {target} 的基地，但护盾生效，进攻失败。\n"
@@ -644,8 +663,8 @@ async def _execute_bot_attack(uid: str, p: dict):
     if float(p.get("shield_until", 0)) > now:
         shield_until = float(p.get("shield_until", 0))
         remaining = max(0.0, shield_until - now)
-        cut_seconds = int(remaining * 0.5)
-        new_until = now + (remaining * 0.5)
+        cut_seconds = _bot_attack_shield_cut_seconds(p, remaining)
+        new_until = max(now, shield_until - cut_seconds)
         await set_field(uid, "shield_until", new_until)
         await set_field(uid, "bot_last_attack", now)
         await add_battle_log(uid, {

@@ -1,6 +1,7 @@
 import random
 import time
 
+from core import redis
 from config import (
     TROOPS, BUILDINGS, SHIELD_DURATION, LOOT_PERCENT,
     TROPHY_ATTACK, TROPHY_DEFENSE, LOOT_STORAGE_FACTOR, LOOT_COLLECTOR_FACTOR,
@@ -11,6 +12,14 @@ from models import (
     iter_damageable_defense_buildings, apply_building_damage_increments,
     get_max_gold, get_max_elixir, add_battle_log,
 )
+
+
+async def _rotate_shield_token(uid: str, shield_until: float) -> str:
+    now = time.time()
+    token = f"{int(now)}-{random.randint(100000, 999999)}"
+    ttl = max(3600, int(max(0.0, float(shield_until) - now)) + 24 * 3600)
+    await redis.set(f"coc:shield_token:{uid}", token, ex=ttl)
+    return token
 
 def _building_series_ids(base_bid: str) -> list[str]:
     ids = [bid for bid in BUILDINGS if bid == base_bid or bid.startswith(f"{base_bid}_")]
@@ -385,6 +394,7 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         await set_field(defender_uid, "shield_source", "defense")
         await set_field(defender_uid, "shield_purchase_points", 0)
         await set_field(defender_uid, "shield_refund_eligible", 0)
+        await _rotate_shield_token(defender_uid, shield)
         result["defender_shield_seconds"] = shield_seconds
 
     # 防御设施损伤（被玩家攻击同样会损伤）
