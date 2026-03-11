@@ -7,6 +7,7 @@ from core import redis, points_redis
 from config import (
     STARTING_GOLD, STARTING_ELIXIR, STARTING_POINTS, STARTING_BUILDINGS,
     BUILDINGS, TROOPS, CLAN_MAX_MEMBERS, NEWBIE_SHIELD,
+    BUILDING_REMOVE_FULL_REFUND_WINDOW, BUILDING_REMOVE_REFUND_DECAY_PER_SEC,
 )
 
 SHARED_POINTS_INIT = 20000.0
@@ -101,6 +102,8 @@ async def ensure_player(uid: str, name: str) -> dict:
             await redis.hset(f"coc:{uid}", "bot_next_attack_at", "0")
         if "building_damage" not in data:
             await redis.hset(f"coc:{uid}", "building_damage", "{}")
+        if "building_placed_at" not in data:
+            await redis.hset(f"coc:{uid}", "building_placed_at", "{}")
         p["points"] = await get_points(uid)
         if abs(float(data.get("points", 0)) - p["points"]) > 1e-9:
             await redis.hset(f"coc:{uid}", "points", str(p["points"]))
@@ -132,6 +135,7 @@ async def init_player(uid: str, name: str) -> dict:
         "bot_last_attack": "0",
         "bot_next_attack_at": "0",
         "building_damage": "{}",
+        "building_placed_at": "{}",
         "created_at": str(now),
     }
     await redis.hset(f"coc:{uid}", mapping=data)
@@ -164,6 +168,7 @@ def _parse(data: dict) -> dict:
         "bot_last_attack": float(data.get("bot_last_attack", 0)),
         "bot_next_attack_at": float(data.get("bot_next_attack_at", 0)),
         "building_damage": json.loads(data.get("building_damage", "{}")),
+        "building_placed_at": json.loads(data.get("building_placed_at", "{}")),
         "created_at": float(data.get("created_at", 0)),
     }
 
@@ -302,6 +307,10 @@ async def set_building_damage(uid: str, damage: dict):
     await redis.hset(f"coc:{uid}", "building_damage", json.dumps(damage))
 
 
+async def set_building_placed_at(uid: str, building_placed_at: dict):
+    await redis.hset(f"coc:{uid}", "building_placed_at", json.dumps(building_placed_at))
+
+
 async def incr_field(uid: str, field: str, amount: int = 1):
     await redis.hincrby(f"coc:{uid}", field, amount)
 
@@ -389,6 +398,30 @@ def apply_building_damage_increments(p: dict, increments: dict[str, float]) -> d
         old = min(1.0, max(0.0, float(new_map.get(bid, 0) or 0)))
         new_map[bid] = min(1.0, old + float(inc))
     return new_map
+
+
+def get_building_remove_refund(p: dict, bid: str, now_ts: float | None = None) -> int:
+    lv = int(p.get("buildings", {}).get(bid, 0))
+    if lv <= 0:
+        return 0
+    costs = BUILDINGS.get(bid, {}).get("costs", [])
+    if not costs:
+        return 0
+    base_cost = float(costs[0])
+    if base_cost <= 0:
+        return 0
+    placed_map = p.get("building_placed_at", {})
+    if not isinstance(placed_map, dict):
+        return 0
+    placed_at = float(placed_map.get(bid, 0) or 0)
+    if placed_at <= 0:
+        return 0
+    now = float(now_ts if now_ts is not None else time.time())
+    age_seconds = max(0.0, now - placed_at)
+    if age_seconds >= BUILDING_REMOVE_FULL_REFUND_WINDOW:
+        return 0
+    refund_ratio = max(0.0, 1.0 - age_seconds * BUILDING_REMOVE_REFUND_DECAY_PER_SEC)
+    return max(0, int(round(base_cost * refund_ratio)))
 
 
 def get_available_troops(p: dict) -> list[str]:

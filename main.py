@@ -46,6 +46,7 @@ COMMANDS = [
     BotCommand(command="clan_repair", description="修复防御建筑"),
     BotCommand(command="clan_shop", description="建筑商店"),
     BotCommand(command="clan_build", description="建造新建筑"),
+    BotCommand(command="clan_remove", description="移除建筑并返还资源"),
     BotCommand(command="clan_upgrade", description="升级建筑"),
     BotCommand(command="clan_create", description="创建部落"),
     BotCommand(command="clan_info", description="查看部落信息"),

@@ -113,6 +113,7 @@ def _init_db(conn: sqlite3.Connection):
         bot_last_attack REAL DEFAULT 0,
         bot_next_attack_at REAL DEFAULT 0,
         building_damage TEXT DEFAULT '{}',
+        building_placed_at TEXT DEFAULT '{}',
         created_at TEXT
     )''')
     cols = [row[1] for row in c.execute("PRAGMA table_info(players)").fetchall()]
@@ -134,6 +135,8 @@ def _init_db(conn: sqlite3.Connection):
         c.execute("ALTER TABLE players ADD COLUMN bot_next_attack_at REAL DEFAULT 0")
     if "building_damage" not in cols:
         c.execute("ALTER TABLE players ADD COLUMN building_damage TEXT DEFAULT '{}'")
+    if "building_placed_at" not in cols:
+        c.execute("ALTER TABLE players ADD COLUMN building_placed_at TEXT DEFAULT '{}'")
     c.execute('''CREATE TABLE IF NOT EXISTS clans (
         clan_id TEXT PRIMARY KEY,
         name TEXT,
@@ -188,6 +191,7 @@ async def perform_backup() -> dict:
                 float(raw.get("bot_last_attack", 0)),
                 float(raw.get("bot_next_attack_at", 0)),
                 raw.get("building_damage", "{}"),
+                raw.get("building_placed_at", "{}"),
                 raw.get("created_at", ""),
             ))
         # 战斗日志
@@ -222,7 +226,7 @@ async def perform_backup() -> dict:
         c = conn.cursor()
         c.execute("BEGIN TRANSACTION")
         c.executemany(
-            "INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             players_data,
         )
         c.executemany(
@@ -289,6 +293,8 @@ async def perform_restore() -> dict:
             + ("bot_next_attack_at" if "bot_next_attack_at" in has else "0 as bot_next_attack_at")
             + ","
             + ("building_damage" if "building_damage" in has else "'{}' as building_damage")
+            + ","
+            + ("building_placed_at" if "building_placed_at" in has else "'{}' as building_placed_at")
             + ",created_at FROM players"
         )
         players = c.fetchall()
@@ -332,7 +338,8 @@ async def perform_restore() -> dict:
             "bot_last_attack": str(row[18]),
             "bot_next_attack_at": str(row[19]),
             "building_damage": row[20],
-            "created_at": row[21],
+            "building_placed_at": row[21],
+            "created_at": row[22],
         }
         pipe.hset(f"coc:{uid}", mapping=mapping)
         pipe.sadd("coc:all_players", uid)

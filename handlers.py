@@ -16,6 +16,7 @@ from config import (
     CLAN_CREATE_COST, SUPER_ADMIN_ID, ADMIN_IDS,
     NEWBIE_SHIELD, TZ_BJ,
     LAST_FIX_DESC,
+    BUILDING_REMOVE_FULL_REFUND_WINDOW,
 )
 from core import redis, bot
 from models import (
@@ -24,7 +25,7 @@ from models import (
     get_max_gold, get_max_elixir, get_army_capacity, get_army_size,
     get_defense_power, get_available_troops,
     get_repair_cost_for_building, get_building_damage_ratio, set_building_damage,
-    iter_damageable_defense_buildings,
+    iter_damageable_defense_buildings, set_building_placed_at, get_building_remove_refund,
     create_clan, get_clan, join_clan, leave_clan, list_clans,
     get_all_player_uids, incr_field, get_battle_log,
     set_field,
@@ -70,6 +71,7 @@ KNOWN_CLAN_COMMANDS = {
     "clan_sell",
     "clan_shop",
     "clan_build",
+    "clan_remove",
     "clan_upgrade",
     "clan_troops",
     "clan_train",
@@ -478,6 +480,39 @@ async def _repair_defense_buildings(uid: str, p: dict, bids: list[str]) -> tuple
     return total_cost, repaired
 
 
+async def _remove_building_and_refund(uid: str, p: dict, bid: str) -> tuple[int, str, float]:
+    placed_at = 0.0
+    if isinstance(p.get("building_placed_at", {}), dict):
+        placed_at = float(p["building_placed_at"].get(bid, 0) or 0)
+    refund = get_building_remove_refund(p, bid)
+    res = BUILDINGS[bid]["resource"]
+    if refund > 0:
+        if res == "gold":
+            await add_gold(uid, refund)
+        else:
+            await add_elixir(uid, refund)
+        p[res] += refund
+
+    bld = p["buildings"]
+    bld[bid] = 0
+    await set_buildings(uid, bld)
+    p["buildings"] = bld
+
+    damage_map = p.get("building_damage", {})
+    if isinstance(damage_map, dict) and bid in damage_map:
+        damage_map.pop(bid, None)
+        await set_building_damage(uid, damage_map)
+        p["building_damage"] = damage_map
+
+    placed_map = p.get("building_placed_at", {})
+    if not isinstance(placed_map, dict):
+        placed_map = {}
+    placed_map.pop(bid, None)
+    await set_building_placed_at(uid, placed_map)
+    p["building_placed_at"] = placed_map
+    return refund, res, placed_at
+
+
 async def _maybe_auto_collect(uid: str, p: dict) -> tuple[int, int]:
     if float(p.get("auto_collect_until", 0)) <= time.time():
         return 0, 0
@@ -782,6 +817,7 @@ async def cmd_help(msg: types.Message):
         "🏗️ <b>建造</b>\n"
         "/clan_shop - 建筑商店\n"
         "/clan_build - 建造新建筑（推荐用商店按钮）\n"
+        "/clan_remove [建筑ID/建筑名] - 移除建筑并返还部分资源（大本营不可移除）\n"
         "/clan_upgrade - 升级建筑（推荐用商店按钮）\n\n"
         "⚔️ <b>军事</b>\n"
         "/clan_troops - 可训练兵种列表\n"
@@ -1225,10 +1261,65 @@ async def cmd_build(msg: types.Message):
 
     bld[bid] = 1
     await set_buildings(uid, bld)
+    placed_map = p.get("building_placed_at", {})
+    if not isinstance(placed_map, dict):
+        placed_map = {}
+    placed_map[bid] = time.time()
+    await set_building_placed_at(uid, placed_map)
 
     await msg.reply(
         f"✅ 建造 {info['emoji']} <b>{info['name']}</b> Lv.1 完成！\n"
         f"花费: {fmt_num(cost)} {'💰' if res == 'gold' else '💧'}"
+    )
+
+
+# ───────────────────── /remove ─────────────────────
+
+@router.message(Command("clan_remove"))
+async def cmd_remove(msg: types.Message):
+    if not _check(msg):
+        return
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2:
+        await msg.reply(
+            "用法: /clan_remove [建筑ID/建筑名]\n"
+            "示例: /clan_remove cannon_2 或 /clan_remove 加农炮2\n"
+            "规则: 返还 = 建造原价 × (1 - 放置时长/3天)，超过3天返还为0；大本营不可移除"
+        )
+        return
+
+    raw_name = args[1].strip()
+    bid = _resolve_building_id(raw_name)
+    if not bid:
+        await msg.reply(f"❌ 未知建筑: {raw_name}")
+        return
+    if bid == "town_hall":
+        await msg.reply("❌ 大本营不可移除")
+        return
+
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    bld = p["buildings"]
+    cur_lv = int(bld.get(bid, 0))
+    if cur_lv <= 0:
+        await msg.reply(f"❌ 尚未建造 {BUILDINGS[bid]['name']}")
+        return
+
+    refund, res, placed_at = await _remove_building_and_refund(uid, p, bid)
+
+    age_hint = ""
+    if placed_at > 0:
+        age_seconds = max(0, int(time.time() - placed_at))
+        remain = max(0, BUILDING_REMOVE_FULL_REFUND_WINDOW - age_seconds)
+        if remain > 0:
+            h, m = divmod(remain // 60, 60)
+            d, h = divmod(h, 24)
+            age_hint = f"\n返还窗口剩余: {d}天{h}小时{m}分钟"
+
+    await msg.reply(
+        f"🧹 已移除 {BUILDINGS[bid]['emoji']} <b>{BUILDINGS[bid]['name']}</b>\n"
+        f"返还: {fmt_num(refund)} {'💰' if res == 'gold' else '💧'}"
+        f"{age_hint}"
     )
 
 
@@ -2827,6 +2918,14 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             btns = [[InlineKeyboardButton(
                 text=f"⬆️ 升级 ({res_icon}{fmt_num(cost)})",
                 callback_data=f"vm:up:{bid}:{uid}")]]
+        if cur_lv > 0 and bid != "town_hall":
+            remove_refund = get_building_remove_refund(p, bid)
+            remove_res_icon = "💰" if info["resource"] == "gold" else "💧"
+            lines.append(f"移除返还(当前): {remove_res_icon} {fmt_num(remove_refund)}")
+            btns.append([InlineKeyboardButton(
+                text=f"🧹 移除建筑 (返还{remove_res_icon}{fmt_num(remove_refund)})",
+                callback_data=f"vm:rm:{bid}:{uid}",
+            )])
         if cur_lv > 0 and "defense" in info:
             repair_cost = get_repair_cost_for_building(p, bid)
             if repair_cost > 0:
@@ -2930,6 +3029,90 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             pass
         await cb.answer("✅ 修复完成")
 
+    elif action == "rm":
+        bid = parts[2]
+        owner_uid = parts[3]
+        if bid not in BUILDINGS:
+            await cb.answer("未知建筑", show_alert=True)
+            return
+        if bid == "town_hall":
+            await cb.answer("❌ 大本营不可移除", show_alert=True)
+            return
+        if p["buildings"].get(bid, 0) <= 0:
+            await cb.answer("❌ 建筑未建造", show_alert=True)
+            return
+        info = BUILDINGS[bid]
+        refund = get_building_remove_refund(p, bid)
+        res = info["resource"]
+        placed_at = 0.0
+        if isinstance(p.get("building_placed_at", {}), dict):
+            placed_at = float(p["building_placed_at"].get(bid, 0) or 0)
+        age_hint = ""
+        if placed_at > 0:
+            age_seconds = max(0, int(time.time() - placed_at))
+            remain = max(0, BUILDING_REMOVE_FULL_REFUND_WINDOW - age_seconds)
+            if remain > 0:
+                h, m = divmod(remain // 60, 60)
+                d, h = divmod(h, 24)
+                age_hint = f"\n返还窗口剩余: {d}天{h}小时{m}分钟"
+            else:
+                age_hint = "\n返还窗口已过期（返还为 0）"
+        else:
+            age_hint = "\n该建筑暂无放置时间记录（返还为 0）"
+        text = (
+            f"⚠️ <b>确认移除建筑</b>\n"
+            f"目标: {info['emoji']} <b>{info['name']}</b>\n"
+            f"预计返还: {'💰' if res == 'gold' else '💧'} {fmt_num(refund)}"
+            f"{age_hint}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ 确认移除", callback_data=f"vm:rmd:{bid}:{uid}")],
+            [InlineKeyboardButton(text="❎ 取消", callback_data=f"vm:bld:{bid}:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回商店", callback_data=f"vm:shop:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("请确认是否移除")
+
+    elif action == "rmd":
+        bid = parts[2]
+        owner_uid = parts[3]
+        if bid not in BUILDINGS:
+            await cb.answer("未知建筑", show_alert=True)
+            return
+        if bid == "town_hall":
+            await cb.answer("❌ 大本营不可移除", show_alert=True)
+            return
+        if p["buildings"].get(bid, 0) <= 0:
+            await cb.answer("❌ 建筑未建造", show_alert=True)
+            return
+        refund, res, placed_at = await _remove_building_and_refund(uid, p, bid)
+        age_hint = ""
+        if placed_at > 0:
+            age_seconds = max(0, int(time.time() - placed_at))
+            remain = max(0, BUILDING_REMOVE_FULL_REFUND_WINDOW - age_seconds)
+            if remain > 0:
+                h, m = divmod(remain // 60, 60)
+                d, h = divmod(h, 24)
+                age_hint = f"\n返还窗口剩余: {d}天{h}小时{m}分钟"
+        info = BUILDINGS[bid]
+        text = (
+            f"🧹 已移除 {info['emoji']} <b>{info['name']}</b>\n"
+            f"返还: {'💰' if res == 'gold' else '💧'} {fmt_num(refund)}"
+            f"{age_hint}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ 返回商店", callback_data=f"vm:shop:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("✅ 已移除")
+
     elif action == "bu":
         bid = parts[2]
         owner_uid = parts[3]
@@ -2957,6 +3140,12 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             await add_elixir(uid, -cost)
         bld[bid] = 1
         await set_buildings(uid, bld)
+        placed_map = p.get("building_placed_at", {})
+        if not isinstance(placed_map, dict):
+            placed_map = {}
+        placed_map[bid] = time.time()
+        await set_building_placed_at(uid, placed_map)
+        p["building_placed_at"] = placed_map
         p["buildings"] = bld
         p[res] -= cost
         text = (
