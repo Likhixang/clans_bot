@@ -55,6 +55,61 @@ def _pending_collectable(defender: dict, resource: str, now_ts: float | None = N
     return max(0, round(min(produced, room)))
 
 
+def _attacker_capacity(attacker: dict) -> int:
+    lv = int(attacker.get("buildings", {}).get("barracks", 1))
+    caps = BUILDINGS["barracks"]["capacity"]
+    idx = min(max(lv - 1, 0), len(caps) - 1)
+    return int(caps[idx])
+
+
+def _calc_loot_multiplier(troops: dict, attacker_capacity: int) -> float:
+    """掠夺倍率：按兵种占总兵营容量计算，避免少量哥布林异常放大。"""
+    cap = max(1, int(attacker_capacity))
+    bonus = 0.0
+    for tid, cnt in troops.items():
+        if cnt <= 0:
+            continue
+        t = TROOPS[tid]
+        loot_bonus = float(t.get("loot_bonus", 1.0))
+        if loot_bonus <= 1.0:
+            continue
+        share = min(1.0, (t["housing"] * cnt) / cap)
+        bonus += (loot_bonus - 1.0) * share
+    # 总加成封顶，避免全哥布林时掠夺比例过高
+    return 1.0 + min(0.35, bonus)
+
+
+def _air_ground_share_by_housing(troops: dict) -> tuple[float, float]:
+    air_housing = 0.0
+    total_housing = 0.0
+    for tid, cnt in troops.items():
+        if cnt <= 0:
+            continue
+        t = TROOPS[tid]
+        h = float(t["housing"] * cnt)
+        total_housing += h
+        if t.get("bypass_wall"):
+            air_housing += h
+    if total_housing <= 0:
+        return 0.0, 1.0
+    air_share = min(1.0, max(0.0, air_housing / total_housing))
+    return air_share, 1.0 - air_share
+
+
+def _attack_type_adjusted_defense(
+    anti_air_def: float,
+    anti_ground_def: float,
+    air_share: float,
+    ground_share: float,
+) -> tuple[float, float]:
+    """按空军/陆军占比调整防御有效值。"""
+    aa_mult = 1.0 + 0.35 * air_share - 0.25 * ground_share
+    ag_mult = 1.0 + 0.35 * ground_share - 0.25 * air_share
+    aa_mult = min(1.45, max(0.45, aa_mult))
+    ag_mult = min(1.45, max(0.45, ag_mult))
+    return anti_air_def * aa_mult, anti_ground_def * ag_mult
+
+
 def _calc_pvp_damage_increments(defender: dict, stars: int) -> dict[str, float]:
     """玩家进攻造成的防御建筑损伤。"""
     star_factor = {0: 0.45, 1: 0.8, 2: 1.15, 3: 1.45}.get(stars, 0.8)
@@ -99,8 +154,10 @@ def calc_points_shield_cost(p: dict) -> int:
 def calc_defense_shield_seconds(defender: dict, stars: int) -> int:
     """防守护盾时长：越强基地越短，最低 1 小时。"""
     if stars <= 0:
-        return 0
-    base = int(SHIELD_DURATION.get(stars, 0))
+        # 0星防守也给短护盾（仅玩家PvP），时长显著低于1星
+        base = 45 * 60
+    else:
+        base = int(SHIELD_DURATION.get(stars, 0))
     if base <= 0:
         return 0
 
@@ -112,6 +169,10 @@ def calc_defense_shield_seconds(defender: dict, stars: int) -> int:
     defense_score = min(1.0, max(0.0, defense / 22000.0))
     trophy_score = min(1.0, max(0.0, trophies / 6000.0))
     strength = 0.45 * th_score + 0.40 * defense_score + 0.15 * trophy_score
+
+    if stars <= 0:
+        reduced = int(round(base * (1.0 - 0.60 * strength)))
+        return max(30 * 60, min(base, reduced))
 
     reduced = int(round(base * (1.0 - 0.75 * strength)))
     return max(3600, min(base, reduced))
@@ -237,9 +298,8 @@ def calculate_attack(attacker: dict, defender: dict,
     base_attack = 0
     wall_attack = 0
     has_air = False
-    balloon_housing = 0
-    total_housing = 0
-    loot_multiplier = 1.0
+    air_share, ground_share = _air_ground_share_by_housing(troops)
+    loot_multiplier = _calc_loot_multiplier(troops, _attacker_capacity(attacker))
 
     for tid, cnt in troops.items():
         if cnt <= 0:
@@ -247,8 +307,6 @@ def calculate_attack(attacker: dict, defender: dict,
         t = TROOPS[tid]
         power = t["power"] * cnt
         base_attack += power
-        unit_housing = t["housing"] * cnt
-        total_housing += unit_housing
 
         if t.get("wall_damage"):
             wall_attack += power * t["wall_damage"]
@@ -257,13 +315,6 @@ def calculate_attack(attacker: dict, defender: dict,
 
         if t.get("bypass_wall"):
             has_air = True
-        if tid == "balloon":
-            balloon_housing += unit_housing
-        if t.get("loot_bonus"):
-            goblin_ratio = (cnt * t["housing"]) / max(sum(
-                TROOPS[k]["housing"] * v for k, v in troops.items() if v > 0
-            ), 1)
-            loot_multiplier += (t["loot_bonus"] - 1) * goblin_ratio
 
     # ── 防御力 ──
     bld = defender["buildings"]
@@ -295,13 +346,21 @@ def calculate_attack(attacker: dict, defender: dict,
     if wall_lv > 0:
         wall_def = get_effective_building_defense(defender, "wall")
 
-    # 气球兵克制关系：
-    # - 更怕箭塔（箭塔等效防御上调）
-    # - 更克制加农炮（加农炮等效防御下调）
-    balloon_ratio = balloon_housing / max(total_housing, 1)
-    if balloon_ratio > 0:
-        tower_def *= (1.0 + 0.25 * balloon_ratio)
-        cannon_def *= (1.0 - 0.20 * balloon_ratio)
+    anti_air_def = tower_def + air_def
+    anti_ground_def = cannon_def + mortar_def + wall_def
+    anti_air_def, anti_ground_def = _attack_type_adjusted_defense(
+        anti_air_def, anti_ground_def, air_share, ground_share
+    )
+    # 将调整后的值按原比例回填，保证后续城墙规则可复用
+    aa_total = tower_def + air_def
+    if aa_total > 0:
+        tower_def = anti_air_def * (tower_def / aa_total)
+        air_def = anti_air_def * (air_def / aa_total)
+    ag_total = cannon_def + mortar_def + wall_def
+    if ag_total > 0:
+        cannon_def = anti_ground_def * (cannon_def / ag_total)
+        mortar_def = anti_ground_def * (mortar_def / ag_total)
+        wall_def = anti_ground_def * (wall_def / ag_total)
 
     # 空军无视城墙
     effective_wall = 0 if has_air else wall_def
@@ -416,8 +475,8 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         await set_troops(attacker_uid, {})
 
     # 护盾
-    if stars > 0:
-        shield_seconds = calc_defense_shield_seconds(defender, stars)
+    shield_seconds = calc_defense_shield_seconds(defender, stars)
+    if shield_seconds > 0:
         shield = time.time() + shield_seconds
         await set_field(defender_uid, "shield_until", shield)
         await set_field(defender_uid, "shield_source", "defense")
@@ -484,28 +543,18 @@ def preview_attack(attacker: dict, defender: dict,
     base_attack = 0
     has_air = False
     has_wall_breaker = False
-    balloon_housing = 0
-    total_housing = 0
-    loot_multiplier = 1.0
+    air_share, ground_share = _air_ground_share_by_housing(troops)
+    loot_multiplier = _calc_loot_multiplier(troops, _attacker_capacity(attacker))
 
     for tid, cnt in troops.items():
         if cnt <= 0:
             continue
         t = TROOPS[tid]
         base_attack += t["power"] * cnt
-        unit_housing = t["housing"] * cnt
-        total_housing += unit_housing
         if t.get("bypass_wall"):
             has_air = True
         if t.get("wall_damage"):
             has_wall_breaker = True
-        if tid == "balloon":
-            balloon_housing += unit_housing
-        if t.get("loot_bonus"):
-            goblin_ratio = (cnt * t["housing"]) / max(sum(
-                TROOPS[k]["housing"] * v for k, v in troops.items() if v > 0
-            ), 1)
-            loot_multiplier += (t["loot_bonus"] - 1) * goblin_ratio
 
     bld = defender["buildings"]
     cannon_def = 0
@@ -534,10 +583,20 @@ def preview_attack(attacker: dict, defender: dict,
     if wall_lv > 0:
         wall_def = get_effective_building_defense(defender, "wall")
 
-    balloon_ratio = balloon_housing / max(total_housing, 1)
-    if balloon_ratio > 0:
-        tower_def *= (1.0 + 0.25 * balloon_ratio)
-        cannon_def *= (1.0 - 0.20 * balloon_ratio)
+    anti_air_def = tower_def + air_def
+    anti_ground_def = cannon_def + mortar_def + wall_def
+    anti_air_def, anti_ground_def = _attack_type_adjusted_defense(
+        anti_air_def, anti_ground_def, air_share, ground_share
+    )
+    aa_total = tower_def + air_def
+    if aa_total > 0:
+        tower_def = anti_air_def * (tower_def / aa_total)
+        air_def = anti_air_def * (air_def / aa_total)
+    ag_total = cannon_def + mortar_def + wall_def
+    if ag_total > 0:
+        cannon_def = anti_ground_def * (cannon_def / ag_total)
+        mortar_def = anti_ground_def * (mortar_def / ag_total)
+        wall_def = anti_ground_def * (wall_def / ag_total)
 
     effective_wall = 0 if has_air else wall_def
     if has_wall_breaker:

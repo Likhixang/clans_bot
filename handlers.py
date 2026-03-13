@@ -3780,10 +3780,13 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             f"🏆 奖杯: {'+' if combat['atk_trophy'] >= 0 else ''}{combat['atk_trophy']}\n\n"
             f"⚠️ 出战部队已消耗"
         )
-        if stars >= 1:
-            sec = int(combat.get("defender_shield_seconds") or calc_defense_shield_seconds(defender, stars))
+        sec = int(combat.get("defender_shield_seconds") or calc_defense_shield_seconds(defender, stars))
+        if sec > 0:
             h, m = divmod(sec // 60, 60)
-            text += f"\n🛡️ 对方获得 {h}小时{m}分钟 护盾"
+            if stars <= 0:
+                text += f"\n🛡️ 对方获得 {h}小时{m}分钟 短护盾"
+            else:
+                text += f"\n🛡️ 对方获得 {h}小时{m}分钟 护盾"
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")]
