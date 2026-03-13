@@ -817,17 +817,25 @@ async def _reward_war_participants(
         reward_a = CLAN_WAR_REWARD_DRAW
         reward_b = CLAN_WAR_REWARD_DRAW
 
+    paid_a = 0
+    paid_b = 0
     for uid in roster_a:
         p = await get_player(uid)
         if not p or p.get("clan_id") != clan_a_id:
             continue
-        await add_points(uid, reward_a)
+        castle_lv = int(p.get("buildings", {}).get("clan_castle", 0))
+        final_reward = reward_a + min(20, castle_lv * 2)
+        await add_points(uid, final_reward)
+        paid_a += 1
     for uid in roster_b:
         p = await get_player(uid)
         if not p or p.get("clan_id") != clan_b_id:
             continue
-        await add_points(uid, reward_b)
-    return reward_a, reward_b, len(roster_a), len(roster_b)
+        castle_lv = int(p.get("buildings", {}).get("clan_castle", 0))
+        final_reward = reward_b + min(20, castle_lv * 2)
+        await add_points(uid, final_reward)
+        paid_b += 1
+    return reward_a, reward_b, paid_a, paid_b
 
 
 async def war_progress_task():
@@ -890,7 +898,7 @@ async def war_progress_task():
                         winner = war["clan_b"]
                         result = f"{safe_html(cb['name']) if cb else '对方'} 胜"
                     summary = f"{result}（⭐{a_stars}-{b_stars}，💥{a_dest:.1f}% - {b_dest:.1f}%）"
-                    reward_a, reward_b, count_a, count_b = await _reward_war_participants(
+                    reward_a, reward_b, paid_a, paid_b = await _reward_war_participants(
                         winner, roster_a, roster_b, war["clan_a"], war["clan_b"]
                     )
                     await _unpin_war_announce(war)
@@ -903,8 +911,8 @@ async def war_progress_task():
                             f"🏯 {safe_html(cb['name']) if cb else 'B'}  ⭐{b_stars} / 💥{b_dest:.1f}%\n\n"
                             f"结果：{summary}\n\n"
                             f"🎁 积分奖励：\n"
-                            f"{safe_html(ca['name']) if ca else 'A'} 参战成员每人 +{reward_a}（共 {count_a} 人）\n"
-                            f"{safe_html(cb['name']) if cb else 'B'} 参战成员每人 +{reward_b}（共 {count_b} 人）"
+                            f"{safe_html(ca['name']) if ca else 'A'} 参战成员基础 +{reward_a}（实际发放 {paid_a} 人，城堡等级额外 +0~20）\n"
+                            f"{safe_html(cb['name']) if cb else 'B'} 参战成员基础 +{reward_b}（实际发放 {paid_b} 人，城堡等级额外 +0~20）"
                         ),
                     )
         except Exception as e:

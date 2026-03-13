@@ -229,6 +229,12 @@ async def collect_resources(uid: str, p: dict, until_ts: float | None = None) ->
 
     gold_prod = gold_prod_per_hour * elapsed_h
     elix_prod = elix_prod_per_hour * elapsed_h
+    builder_lv = int(bld.get("builder_hut", 0))
+    if builder_lv > 0:
+        # 工人小屋：提高自动采集效率，满级最高 +30%
+        boost = min(0.30, builder_lv * 0.03)
+        gold_prod *= (1.0 + boost)
+        elix_prod *= (1.0 + boost)
 
     max_gold = get_max_gold(p)
     max_elix = get_max_elixir(p)
@@ -358,7 +364,10 @@ def get_max_elixir(p: dict) -> float:
 
 def get_army_capacity(p: dict) -> int:
     lv = p["buildings"].get("barracks", 1)
-    return BUILDINGS["barracks"]["capacity"][lv - 1]
+    base = BUILDINGS["barracks"]["capacity"][lv - 1]
+    workshop_lv = int(p.get("buildings", {}).get("workshop", 0))
+    # 攻城工坊：额外提升部队容量，满级 +120
+    return base + workshop_lv * 12
 
 
 def get_army_size(p: dict) -> int:
@@ -381,6 +390,12 @@ def get_defense_power(p: dict) -> float:
         lv = bld.get(bid, 0)
         if lv > 0:
             total += get_effective_building_defense(p, bid)
+    hero_lv = int(bld.get("hero_altar", 0))
+    castle_lv = int(bld.get("clan_castle", 0))
+    if total > 0 and (hero_lv > 0 or castle_lv > 0):
+        # 英雄祭坛 + 部落城堡：全局防御光环，满级最高 +35%
+        aura = min(0.35, hero_lv * 0.02 + castle_lv * 0.015)
+        total *= (1.0 + aura)
     return total
 
 

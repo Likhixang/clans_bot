@@ -141,12 +141,15 @@ def calc_points_shield_cost(p: dict) -> int:
     th_lv = int(p.get("buildings", {}).get("town_hall", 1))
     defense = float(get_defense_power(p))
     loot_total = float(calc_estimated_loot_total(p))
+    spell_lv = int(p.get("buildings", {}).get("spell_factory", 0))
 
     th_score = min(1.0, max(0.0, th_lv / 10.0))
     defense_score = min(1.0, max(0.0, defense / 22000.0))
     loot_score = min(1.0, max(0.0, loot_total / 3000000.0))
 
     weighted = 0.35 * th_score + 0.35 * defense_score + 0.30 * loot_score
+    # 法术工厂：降低护盾购买压力，满级约 -18%
+    weighted *= max(0.72, 1.0 - 0.02 * spell_lv)
     cost = round(50 + weighted * 450)
     return max(50, min(500, int(cost)))
 
@@ -315,6 +318,10 @@ def calculate_attack(attacker: dict, defender: dict,
 
         if t.get("bypass_wall"):
             has_air = True
+    lab_lv = int(attacker.get("buildings", {}).get("laboratory", 0))
+    if base_attack > 0 and lab_lv > 0:
+        # 实验室：全军攻击增强，满级 +20%
+        base_attack *= (1.0 + min(0.20, lab_lv * 0.02))
 
     # ── 防御力 ──
     bld = defender["buildings"]

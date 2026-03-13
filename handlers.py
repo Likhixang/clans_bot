@@ -289,6 +289,12 @@ VILLAGE_LAYOUT_BY_SIZE = {
         (5, 4): "air_defense_3",
         (5, 5): "mortar",
         (5, 6): "mortar_2",
+        (6, 1): "builder_hut",
+        (6, 2): "laboratory",
+        (6, 3): "spell_factory",
+        (6, 4): "workshop",
+        (6, 5): "hero_altar",
+        (6, 6): "clan_castle",
     },
 }
 
@@ -822,6 +828,19 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
         if lv > 0:
             elixir_rate += BUILDINGS[bid]["production"][lv - 1]
     lines.append(f"📈 资源产量  💰 {fmt_num(gold_rate)}/h  |  💧 {fmt_num(elixir_rate)}/h")
+    bmap = p.get("buildings", {})
+    builder_bonus = min(30, int(bmap.get("builder_hut", 0)) * 3)
+    lab_bonus = min(20, int(bmap.get("laboratory", 0)) * 2)
+    workshop_bonus = int(bmap.get("workshop", 0)) * 12
+    hero_bonus = min(20, int(bmap.get("hero_altar", 0)) * 2)
+    castle_bonus = min(15, int(bmap.get("clan_castle", 0)) * 15 // 10)
+    spell_discount = min(18, int(bmap.get("spell_factory", 0)) * 2)
+    lines.append(
+        f"🧠 建筑加成  采集+{builder_bonus}%  攻击+{lab_bonus}%  容量+{workshop_bonus}"
+    )
+    lines.append(
+        f"🛡️ 防御光环+{hero_bonus + castle_bonus}%  护盾价格-{spell_discount}%"
+    )
     lines.append(f"🪙 积分 {fmt_num(p['points'])}")
     lines.append(
         f"🏆 奖杯 {p['trophies']}  |  ⚔️ 战绩 {p['attack_wins']}胜{p['attack_losses']}负  |  🛡️ 防御 {fmt_num(get_defense_power(p))}"
