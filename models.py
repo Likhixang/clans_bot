@@ -11,7 +11,7 @@ from config import (
 )
 
 SHARED_POINTS_INIT = 20000.0
-DAMAGE_DEFENSE_BASES = ("cannon", "archer_tower", "air_defense", "mortar", "wall")
+DAMAGE_DEFENSE_BASES = ("cannon", "archer_tower", "air_defense", "mortar", "wall", "guard_post")
 SUPER_ADMIN_AUTO_COLLECT_UNTIL = 4102444800.0  # 2100-01-01 UTC
 
 
@@ -385,7 +385,7 @@ def get_defense_power(p: dict) -> float:
         + _building_series_ids("archer_tower")
         + _building_series_ids("air_defense")
         + _building_series_ids("mortar")
-        + ["wall"]
+        + ["wall", "guard_post"]
     ):
         lv = bld.get(bid, 0)
         if lv > 0:

@@ -334,6 +334,7 @@ def calculate_attack(attacker: dict, defender: dict,
     for bid in (
         _building_series_ids("cannon")
         + _building_series_ids("archer_tower")
+        + _building_series_ids("guard_post")
         + _building_series_ids("air_defense")
         + _building_series_ids("mortar")
     ):
@@ -572,6 +573,7 @@ def preview_attack(attacker: dict, defender: dict,
     for bid in (
         _building_series_ids("cannon")
         + _building_series_ids("archer_tower")
+        + _building_series_ids("guard_post")
         + _building_series_ids("air_defense")
         + _building_series_ids("mortar")
     ):

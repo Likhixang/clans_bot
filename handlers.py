@@ -83,6 +83,7 @@ KNOWN_CLAN_COMMANDS = {
     "clan_build",
     "clan_remove",
     "clan_upgrade",
+    "clan_wiki",
     "clan_troops",
     "clan_train",
     "clan_army",
@@ -203,7 +204,7 @@ router.callback_query.middleware(TelegramResilienceMiddleware())
 # 基地地块解锁：TH 1-3 => 5x5，TH 4-5 => 6x6，TH 6-7 => 7x7，TH 8+ => 8x8
 VILLAGE_LAYOUT_BY_SIZE = {
     5: {
-        (1, 1): "wall",
+        (1, 1): "guard_post",
         (1, 2): "cannon",
         (1, 3): "archer_tower",
         (2, 1): "gold_mine",
@@ -214,7 +215,7 @@ VILLAGE_LAYOUT_BY_SIZE = {
         (3, 3): "elixir_storage",
     },
     6: {
-        (1, 1): "wall",
+        (1, 1): "guard_post",
         (1, 2): "cannon",
         (1, 3): "cannon_2",
         (1, 4): "archer_tower",
@@ -232,7 +233,7 @@ VILLAGE_LAYOUT_BY_SIZE = {
         (4, 4): "cannon_3",
     },
     7: {
-        (1, 1): "wall",
+        (1, 1): "guard_post",
         (1, 2): "cannon",
         (1, 3): "cannon_2",
         (1, 4): "cannon_3",
@@ -259,7 +260,7 @@ VILLAGE_LAYOUT_BY_SIZE = {
         (5, 5): "archer_tower_5",
     },
     8: {
-        (1, 1): "wall",
+        (1, 1): "guard_post",
         (1, 2): "cannon",
         (1, 3): "cannon_2",
         (1, 4): "cannon_3",
@@ -1131,6 +1132,7 @@ async def cmd_help(msg: types.Message):
         "/clan_build - 建造新建筑（推荐用商店按钮）\n"
         "/clan_remove [建筑ID/建筑名] - 移除建筑并返还部分资源（大本营不可移除）\n"
         "/clan_upgrade - 升级建筑（推荐用商店按钮）\n\n"
+        "/clan_wiki - 建筑/兵种图鉴\n\n"
         "⚔️ <b>军事</b>\n"
         "/clan_troops - 可训练兵种列表\n"
         "/clan_train [兵种名] [数量] - 训练部队（支持中文兵种名，推荐用部队按钮）\n"
@@ -1742,6 +1744,52 @@ async def cmd_troops(msg: types.Message):
         )
 
     await msg.reply("\n".join(lines))
+
+
+@router.message(Command("clan_wiki"))
+async def cmd_wiki(msg: types.Message):
+    if not _check(msg):
+        return
+    lines = ["📚 <b>部落冲突图鉴</b>\n"]
+    lines.append("🏗️ <b>建筑图鉴</b>")
+    for bid, info in BUILDINGS.items():
+        max_lv = int(info.get("max_level", 0) or 0)
+        req = int(info.get("th_required", 1) or 1)
+        res = "💰金币" if info.get("resource") == "gold" else "💧圣水"
+        extra = ""
+        if "production" in info:
+            vals = info["production"]
+            extra = f" | 产量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}/h"
+        elif "capacity" in info:
+            vals = info["capacity"]
+            extra = f" | 容量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
+        elif "defense" in info:
+            vals = info["defense"]
+            extra = f" | 防御 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
+        lines.append(
+            f"{info['emoji']} <b>{safe_html(info['name'])}</b>（{bid}）\n"
+            f"  解锁TH Lv.{req} | 最高Lv.{max_lv} | {res}{extra}"
+        )
+
+    lines.append("\n🗡️ <b>兵种图鉴</b>")
+    for tid, t in TROOPS.items():
+        unlock = int(t.get("barracks_level", 1) or 1)
+        lines.append(
+            f"{t['emoji']} <b>{safe_html(t['name'])}</b>（{tid}）\n"
+            f"  兵营Lv.{unlock} | 费用💧{fmt_num(t['cost'])} | 战力⚔️{fmt_num(t['power'])} | 占用🏠{t['housing']}"
+        )
+
+    text = "\n".join(lines)
+    if len(text) <= 3800:
+        await msg.reply(text)
+        return
+    split_at = text.find("\n🗡️ <b>兵种图鉴</b>")
+    if split_at == -1:
+        await msg.reply(text[:3800])
+        await msg.reply(text[3800:])
+        return
+    await msg.reply(text[:split_at])
+    await msg.reply(text[split_at + 1:])
 
 
 # ───────────────────── /train ─────────────────────
