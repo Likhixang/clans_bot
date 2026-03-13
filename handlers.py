@@ -18,6 +18,8 @@ from config import (
     NEWBIE_SHIELD, TZ_BJ,
     LAST_FIX_DESC,
     BUILDING_REMOVE_FULL_REFUND_WINDOW,
+    CLAN_WAR_PREP_SECONDS, CLAN_WAR_BATTLE_SECONDS,
+    CLAN_WAR_MAX_MEMBERS, CLAN_WAR_MIN_MEMBERS, CLAN_WAR_ATTACKS_PER_MEMBER,
 )
 from core import redis, bot
 from models import (
@@ -38,6 +40,13 @@ from combat import (
 )
 from tasks import perform_backup, perform_restore, get_latest_backup_path, BACKUP_KEEP
 from utils import safe_html, mention, fmt_num, send, pin_in_topic, auto_delete, delete_msg_by_id
+from war import (
+    create_war, get_war, get_active_war_id, get_war_roster, add_war_roster_member,
+    remove_war_roster_member, get_war_used_attacks, incr_war_used_attacks,
+    append_war_attack_log, upsert_war_best_for_target, calc_war_score, get_war_attack_logs,
+    get_war_best_for_target,
+    set_war_pin, clear_war_pin, set_war_phase,
+)
 
 router = Router()
 
@@ -85,6 +94,8 @@ KNOWN_CLAN_COMMANDS = {
     "clan_list",
     "clan_join",
     "clan_leave",
+    "clan_war",
+    "clan_war_challenge",
     "clan_help",
     "clan_give",
     "clan_take",
@@ -837,6 +848,7 @@ def _village_kb(uid: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📜 战绩", callback_data=f"vm:log:{uid}"),
         ],
         [
+            InlineKeyboardButton(text="⚔️ 部落战", callback_data=f"vm:war:{uid}"),
             InlineKeyboardButton(text="🏆 排行", callback_data=f"vm:rank:{uid}"),
             InlineKeyboardButton(text="❓ 帮助", callback_data=f"vm:help:{uid}"),
             InlineKeyboardButton(text="🔄 刷新", callback_data=f"vm:refresh:{uid}"),
@@ -913,6 +925,126 @@ def _name(msg: types.Message) -> str:
     return u.full_name or u.username or "无名"
 
 
+def _war_phase_label(state: str) -> str:
+    if state == "prep":
+        return "🛠️ 准备期"
+    if state == "battle":
+        return "⚔️ 战斗期"
+    if state == "ended":
+        return "✅ 已结束"
+    return "未知"
+
+
+def _war_countdown_text(ts: float) -> str:
+    remain = int(max(0, ts - time.time()))
+    h, m = divmod(remain // 60, 60)
+    d, h = divmod(h, 24)
+    if d > 0:
+        return f"{d}天{h}小时{m}分钟"
+    return f"{h}小时{m}分钟"
+
+
+async def _render_war_panel_text(uid: str, p: dict, war: dict | None, clan: dict | None) -> str:
+    if not clan:
+        return "🏯 你还没有加入部落，无法参与部落战。"
+    if not war:
+        return (
+            f"⚔️ <b>部落战中心</b>\n\n"
+            f"你的部落：<b>{safe_html(clan['name'])}</b>\n"
+            "当前没有进行中的部落战。\n"
+            "可由首领发起宣战。"
+        )
+    my_clan = p.get("clan_id", "")
+    enemy_clan = war["clan_b"] if war["clan_a"] == my_clan else war["clan_a"]
+    enemy = await get_clan(enemy_clan)
+    my_roster = await get_war_roster(war["id"], my_clan)
+    enemy_roster = await get_war_roster(war["id"], enemy_clan)
+    phase = _war_phase_label(war["state"])
+    timer_text = ""
+    if war["state"] == "prep":
+        timer_text = f"\n⏳ 准备期剩余：{_war_countdown_text(war['prep_until'])}"
+    elif war["state"] == "battle":
+        timer_text = f"\n⏳ 战斗期剩余：{_war_countdown_text(war['battle_until'])}"
+
+    my_used = await get_war_used_attacks(war["id"], uid) if war["state"] == "battle" else 0
+    my_left = max(0, int(war["attacks_per_member"]) - my_used)
+
+    score_line = ""
+    if war["state"] in {"battle", "ended"}:
+        my_stars, my_dest = await calc_war_score(war["id"], enemy_roster)
+        en_stars, en_dest = await calc_war_score(war["id"], my_roster)
+        score_line = (
+            f"\n📊 当前比分：\n"
+            f"{safe_html(clan['name'])} ⭐{my_stars} / 💥{my_dest:.1f}%\n"
+            f"{safe_html(enemy['name']) if enemy else '对手'} ⭐{en_stars} / 💥{en_dest:.1f}%"
+        )
+
+    lines = [
+        "⚔️ <b>部落战中心</b>",
+        f"🏯 我方：<b>{safe_html(clan['name'])}</b>",
+        f"🆚 对手：<b>{safe_html(enemy['name']) if enemy else '未知部落'}</b>",
+        f"阶段：{phase}{timer_text}",
+        f"👥 我方名单：{len(my_roster)}/{war['max_members']}  |  对方名单：{len(enemy_roster)}/{war['max_members']}",
+    ]
+    if war["state"] == "battle":
+        lines.append(f"🗡️ 你的出手：已用 {my_used}/{war['attacks_per_member']}，剩余 {my_left}")
+    if score_line:
+        lines.append(score_line)
+    if war["state"] == "ended" and war.get("result_summary"):
+        lines.append(f"\n🏁 结果：{safe_html(war['result_summary'])}")
+    return "\n".join(lines)
+
+
+async def _edit_war_panel(cb: types.CallbackQuery, uid: str, p: dict) -> None:
+    clan = await get_clan(p["clan_id"]) if p.get("clan_id") else None
+    war = None
+    if p.get("clan_id"):
+        war_id = await get_active_war_id(p["clan_id"])
+        if war_id:
+            war = await get_war(war_id)
+    text = await _render_war_panel_text(uid, p, war, clan)
+    btns: list[list[InlineKeyboardButton]] = []
+    if war:
+        if war["state"] == "prep":
+            roster = await get_war_roster(war["id"], p["clan_id"])
+            joined = uid in roster
+            btns.append([InlineKeyboardButton(
+                text="✅ 已报名" if joined else "📝 报名参战",
+                callback_data=f"vm:wjoin:{uid}",
+            )])
+            if joined:
+                btns.append([InlineKeyboardButton(text="❌ 取消报名", callback_data=f"vm:wleave:{uid}")])
+            if clan and str(clan.get("leader", "")) == uid:
+                btns.append([InlineKeyboardButton(text="🚀 提前开战", callback_data=f"vm:wstart:{uid}")])
+        elif war["state"] == "battle":
+            btns.append([InlineKeyboardButton(text="⚔️ 发起进攻", callback_data=f"vm:watk:{uid}")])
+            btns.append([InlineKeyboardButton(text="📜 战争日志", callback_data=f"vm:wlog:{uid}")])
+        else:
+            btns.append([InlineKeyboardButton(text="📜 战争日志", callback_data=f"vm:wlog:{uid}")])
+    else:
+        if clan and str(clan.get("leader", "")) == uid:
+            btns.append([InlineKeyboardButton(text="⚔️ 发起宣战", callback_data=f"vm:wchg:{uid}")])
+    btns.append([InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")])
+    try:
+        await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+    except Exception:
+        pass
+
+
+def _calc_war_destruction(combat: dict) -> float:
+    stars = int(combat.get("stars", 0))
+    atk = float(combat.get("attack_power", 0))
+    df = float(combat.get("defense_power", 1))
+    ratio = 10.0 if df <= 0 else atk / df
+    if stars >= 3:
+        return 100.0
+    if stars == 2:
+        return min(99.0, 70.0 + (ratio - 1.2) * 45.0)
+    if stars == 1:
+        return min(69.0, 35.0 + (ratio - 0.6) * 55.0)
+    return max(0.0, min(34.0, ratio * 55.0))
+
+
 # ───────────────────── /start /help ─────────────────────
 
 @router.message(Command("clan_start"))
@@ -972,6 +1104,8 @@ async def cmd_help(msg: types.Message):
         "/clan_list - 所有部落列表\n"
         "/clan_join [部落名称] - 加入部落\n"
         "/clan_leave - 离开部落\n"
+        "/clan_war - 部落战中心\n"
+        "/clan_war_challenge [部落名] - 首领发起宣战\n"
     )
     await msg.reply(text)
 
@@ -2137,6 +2271,9 @@ async def cmd_clan_join(msg: types.Message):
         return
     clan = matched[0]
     clan_id = clan["id"]
+    if await get_active_war_id(clan_id):
+        await msg.reply("❌ 目标部落正在进行部落战，暂不可加入")
+        return
 
     ok = await join_clan(uid, clan_id)
     if not ok:
@@ -2155,6 +2292,9 @@ async def cmd_clan_leave(msg: types.Message):
 
     if not p["clan_id"]:
         await msg.reply("❌ 你不在任何部落中")
+        return
+    if await get_active_war_id(p["clan_id"]):
+        await msg.reply("❌ 部落战进行中，暂不可离开部落")
         return
 
     clan = await get_clan(p["clan_id"])
@@ -2209,6 +2349,116 @@ async def cmd_clan_info(msg: types.Message):
         + "\n".join(member_lines)
     )
     await msg.reply(text)
+
+
+@router.message(Command("clan_war"))
+async def cmd_clan_war(msg: types.Message):
+    if not _check(msg):
+        return
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    if not p.get("clan_id"):
+        await msg.reply("❌ 你还没有加入部落")
+        return
+    clan = await get_clan(p["clan_id"])
+    war = None
+    war_id = await get_active_war_id(p["clan_id"])
+    if war_id:
+        war = await get_war(war_id)
+    text = await _render_war_panel_text(uid, p, war, clan)
+    btns: list[list[InlineKeyboardButton]] = []
+    if war:
+        if war["state"] == "prep":
+            roster = await get_war_roster(war["id"], p["clan_id"])
+            joined = uid in roster
+            btns.append([InlineKeyboardButton(
+                text="✅ 已报名" if joined else "📝 报名参战",
+                callback_data=f"vm:wjoin:{uid}",
+            )])
+            if joined:
+                btns.append([InlineKeyboardButton(text="❌ 取消报名", callback_data=f"vm:wleave:{uid}")])
+            if clan and str(clan.get("leader", "")) == uid:
+                btns.append([InlineKeyboardButton(text="🚀 提前开战", callback_data=f"vm:wstart:{uid}")])
+        elif war["state"] == "battle":
+            btns.append([InlineKeyboardButton(text="⚔️ 发起进攻", callback_data=f"vm:watk:{uid}")])
+            btns.append([InlineKeyboardButton(text="📜 战争日志", callback_data=f"vm:wlog:{uid}")])
+        else:
+            btns.append([InlineKeyboardButton(text="📜 战争日志", callback_data=f"vm:wlog:{uid}")])
+    else:
+        if clan and str(clan.get("leader", "")) == uid:
+            btns.append([InlineKeyboardButton(text="⚔️ 发起宣战", callback_data=f"vm:wchg:{uid}")])
+    btns.append([InlineKeyboardButton(text="◀️ 返回村庄", callback_data=f"vm:refresh:{uid}")])
+    await msg.reply(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+
+
+@router.message(Command("clan_war_challenge"))
+async def cmd_clan_war_challenge(msg: types.Message):
+    if not _check(msg):
+        return
+    args = (msg.text or "").split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        await msg.reply("用法: /clan_war_challenge [对方部落名称]")
+        return
+    target_name = args[1].strip()
+    uid, name = _uid(msg), _name(msg)
+    p = await ensure_player(uid, name)
+    if not p.get("clan_id"):
+        await msg.reply("❌ 你还没有加入部落")
+        return
+    my_clan = await get_clan(p["clan_id"])
+    if not my_clan:
+        await msg.reply("❌ 部落数据异常")
+        return
+    if str(my_clan.get("leader", "")) != uid:
+        await msg.reply("❌ 只有部落首领可以发起宣战")
+        return
+    if await get_active_war_id(p["clan_id"]):
+        await msg.reply("❌ 你的部落已有进行中的部落战")
+        return
+    matched = await _find_clans_by_name(target_name)
+    if not matched:
+        await msg.reply("❌ 未找到该部落")
+        return
+    if len(matched) > 1:
+        await msg.reply("❌ 存在重名部落，请先改名后再宣战")
+        return
+    target = matched[0]
+    target_id = target["id"]
+    if target_id == p["clan_id"]:
+        await msg.reply("❌ 不能向本部落宣战")
+        return
+    if await get_active_war_id(target_id):
+        await msg.reply("❌ 对方部落已有进行中的部落战")
+        return
+    war_id = await create_war(
+        p["clan_id"],
+        target_id,
+        prep_seconds=CLAN_WAR_PREP_SECONDS,
+        max_members=CLAN_WAR_MAX_MEMBERS,
+        attacks_per_member=CLAN_WAR_ATTACKS_PER_MEMBER,
+        min_members=CLAN_WAR_MIN_MEMBERS,
+        chat_id=msg.chat.id,
+    )
+    await add_war_roster_member(war_id, p["clan_id"], uid)
+    war = await get_war(war_id)
+    panel = await _render_war_panel_text(uid, p, war, my_clan)
+    announce = await send(
+        msg.chat.id,
+        (
+            f"⚔️ <b>部落战已开启（准备期）</b>\n\n"
+            f"🏯 {safe_html(my_clan['name'])}  vs  {safe_html(target['name'])}\n"
+            f"🕒 准备期：{_war_countdown_text(war['prep_until'])}\n"
+            f"👥 规模：{CLAN_WAR_MAX_MEMBERS}v{CLAN_WAR_MAX_MEMBERS}（最低 {CLAN_WAR_MIN_MEMBERS} 人）\n\n"
+            f"请使用 /clan_war 或面板按钮报名。"
+        ),
+    )
+    if announce:
+        try:
+            await pin_in_topic(msg.chat.id, announce.message_id, disable_notification=False)
+            await set_war_pin(war_id, announce.message_id, "prep")
+        except Exception:
+            pass
+    await msg.reply(panel)
 
 
 @router.message(Command("clan_list"))
@@ -3802,6 +4052,334 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         _attack_staging.pop(uid, None)
         await _do_attack_inline(cb, uid, name, p)
 
+    elif action == "war":
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        await _edit_war_panel(cb, uid, p)
+        await cb.answer()
+
+    elif action == "wchg":
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        clan = await get_clan(p["clan_id"])
+        if not clan or str(clan.get("leader", "")) != uid:
+            await cb.answer("❌ 只有首领可以发起宣战", show_alert=True)
+            return
+        if await get_active_war_id(p["clan_id"]):
+            await cb.answer("❌ 当前已有进行中的部落战", show_alert=True)
+            return
+        clans = await list_clans()
+        lines = ["⚔️ <b>选择宣战目标</b>\n"]
+        btns: list[list[InlineKeyboardButton]] = []
+        for c in clans:
+            cid = c.get("id", "")
+            if not cid or cid == p["clan_id"]:
+                continue
+            if await get_active_war_id(cid):
+                continue
+            count = len(c.get("members", []))
+            lines.append(f"• <b>{safe_html(c['name'])}</b> | 👥{count}")
+            btns.append([InlineKeyboardButton(text=f"⚔️ {c['name']}", callback_data=f"vm:wchg2:{cid}:{uid}")])
+        if not btns:
+            lines.append("\n暂无可宣战部落（对手可能都在战斗中）")
+        btns.append([InlineKeyboardButton(text="◀️ 返回部落战", callback_data=f"vm:war:{uid}")])
+        try:
+            await cb.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "wchg2":
+        target_clan_id = parts[2]
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        my_clan = await get_clan(p["clan_id"])
+        if not my_clan or str(my_clan.get("leader", "")) != uid:
+            await cb.answer("❌ 只有首领可以发起宣战", show_alert=True)
+            return
+        if await get_active_war_id(p["clan_id"]):
+            await cb.answer("❌ 你的部落已有进行中的部落战", show_alert=True)
+            return
+        if await get_active_war_id(target_clan_id):
+            await cb.answer("❌ 对方部落已有进行中的部落战", show_alert=True)
+            return
+        target = await get_clan(target_clan_id)
+        if not target:
+            await cb.answer("❌ 目标部落不存在", show_alert=True)
+            return
+        war_id = await create_war(
+            p["clan_id"],
+            target_clan_id,
+            prep_seconds=CLAN_WAR_PREP_SECONDS,
+            max_members=CLAN_WAR_MAX_MEMBERS,
+            attacks_per_member=CLAN_WAR_ATTACKS_PER_MEMBER,
+            min_members=CLAN_WAR_MIN_MEMBERS,
+            chat_id=cb.message.chat.id if cb.message else 0,
+        )
+        await add_war_roster_member(war_id, p["clan_id"], uid)
+        war = await get_war(war_id)
+        announce = await send(
+            cb.message.chat.id if cb.message else ALLOWED_CHAT_ID,
+            (
+                f"⚔️ <b>部落战已开启（准备期）</b>\n\n"
+                f"🏯 {safe_html(my_clan['name'])}  vs  {safe_html(target['name'])}\n"
+                f"⏳ 准备期剩余：{_war_countdown_text(war['prep_until'])}\n"
+                f"👥 规模：{CLAN_WAR_MAX_MEMBERS}v{CLAN_WAR_MAX_MEMBERS}（最低 {CLAN_WAR_MIN_MEMBERS} 人）\n\n"
+                "请在部落战面板报名。"
+            ),
+        )
+        if announce:
+            try:
+                await pin_in_topic(announce.chat.id, announce.message_id, disable_notification=False)
+                await set_war_pin(war_id, announce.message_id, "prep")
+            except Exception:
+                pass
+        text = await _render_war_panel_text(uid, p, war, my_clan)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 报名参战", callback_data=f"vm:wjoin:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回部落战", callback_data=f"vm:war:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer("✅ 宣战成功")
+
+    elif action == "wjoin":
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        war_id = await get_active_war_id(p["clan_id"])
+        if not war_id:
+            await cb.answer("❌ 当前没有进行中的部落战", show_alert=True)
+            return
+        war = await get_war(war_id)
+        if not war or war["state"] != "prep":
+            await cb.answer("❌ 当前不在准备期", show_alert=True)
+            return
+        roster = await get_war_roster(war_id, p["clan_id"])
+        if uid in roster:
+            await cb.answer("你已报名")
+            return
+        if len(roster) >= int(war["max_members"]):
+            await cb.answer("❌ 本部落参战名额已满", show_alert=True)
+            return
+        await add_war_roster_member(war_id, p["clan_id"], uid)
+        await cb.answer("✅ 报名成功")
+        await _edit_war_panel(cb, uid, p)
+
+    elif action == "wleave":
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        war_id = await get_active_war_id(p["clan_id"])
+        if not war_id:
+            await cb.answer("❌ 当前没有进行中的部落战", show_alert=True)
+            return
+        war = await get_war(war_id)
+        if not war or war["state"] != "prep":
+            await cb.answer("❌ 当前不在准备期", show_alert=True)
+            return
+        await remove_war_roster_member(war_id, p["clan_id"], uid)
+        await cb.answer("✅ 已取消报名")
+        await _edit_war_panel(cb, uid, p)
+
+    elif action == "wstart":
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        war_id = await get_active_war_id(p["clan_id"])
+        war = await get_war(war_id) if war_id else None
+        clan = await get_clan(p["clan_id"])
+        if not war or war["state"] != "prep":
+            await cb.answer("❌ 当前不在准备期", show_alert=True)
+            return
+        if not clan or str(clan.get("leader", "")) != uid:
+            await cb.answer("❌ 只有首领可以提前开战", show_alert=True)
+            return
+        roster_a = await get_war_roster(war_id, war["clan_a"])
+        roster_b = await get_war_roster(war_id, war["clan_b"])
+        if len(roster_a) < int(war["min_members"]) or len(roster_b) < int(war["min_members"]):
+            await cb.answer("❌ 双方报名人数都需达到最低人数", show_alert=True)
+            return
+        now = time.time()
+        battle_until = now + CLAN_WAR_BATTLE_SECONDS
+        await set_war_phase(war_id, "battle", battle_until=battle_until)
+        pin_id = int(war.get("pin_message_id", 0) or 0)
+        if pin_id:
+            try:
+                await bot.unpin_chat_message(chat_id=war["chat_id"], message_id=pin_id)
+            except Exception:
+                pass
+            await clear_war_pin(war_id)
+        ca = await get_clan(war["clan_a"])
+        cbn = await get_clan(war["clan_b"])
+        announce = await send(
+            war["chat_id"],
+            (
+                f"🚨 <b>部落战进入战斗期！</b>\n\n"
+                f"🏯 {safe_html(ca['name']) if ca else 'A'}  vs  {safe_html(cbn['name']) if cbn else 'B'}\n"
+                f"⏳ 战斗期剩余：{_war_countdown_text(battle_until)}\n"
+                f"每人可进攻 {war['attacks_per_member']} 次。"
+            ),
+        )
+        if announce:
+            try:
+                await pin_in_topic(announce.chat.id, announce.message_id, disable_notification=False)
+                await set_war_pin(war_id, announce.message_id, "battle")
+            except Exception:
+                pass
+        await cb.answer("✅ 已提前开战")
+        await _edit_war_panel(cb, uid, p)
+
+    elif action == "watk":
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        war_id = await get_active_war_id(p["clan_id"])
+        war = await get_war(war_id) if war_id else None
+        if not war or war["state"] != "battle":
+            await cb.answer("❌ 当前不在战斗期", show_alert=True)
+            return
+        my_roster = await get_war_roster(war_id, p["clan_id"])
+        if uid not in my_roster:
+            await cb.answer("❌ 你不在本次参战名单", show_alert=True)
+            return
+        used = await get_war_used_attacks(war_id, uid)
+        if used >= int(war["attacks_per_member"]):
+            await cb.answer("❌ 你的进攻次数已用完", show_alert=True)
+            return
+        enemy_clan = war["clan_b"] if war["clan_a"] == p["clan_id"] else war["clan_a"]
+        enemies = await get_war_roster(war_id, enemy_clan)
+        lines = ["⚔️ <b>选择进攻目标</b>\n"]
+        btns: list[list[InlineKeyboardButton]] = []
+        for target_uid in enemies:
+            target = await get_player(target_uid)
+            if not target:
+                continue
+            best = await get_war_best_for_target(war_id, target_uid)
+            best_text = "未被进攻" if not best else f"最佳 ⭐{best.get('stars',0)} / 💥{float(best.get('destruction',0)):.1f}%"
+            lines.append(f"• {safe_html(target['name'])} | {best_text}")
+            btns.append([InlineKeyboardButton(
+                text=f"⚔️ {target['name']}",
+                callback_data=f"vm:watgt:{target_uid}:{uid}",
+            )])
+        btns.append([InlineKeyboardButton(text="◀️ 返回部落战", callback_data=f"vm:war:{uid}")])
+        try:
+            await cb.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "watgt":
+        target_uid = parts[2]
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        war_id = await get_active_war_id(p["clan_id"])
+        war = await get_war(war_id) if war_id else None
+        if not war or war["state"] != "battle":
+            await cb.answer("❌ 当前不在战斗期", show_alert=True)
+            return
+        my_roster = await get_war_roster(war_id, p["clan_id"])
+        if uid not in my_roster:
+            await cb.answer("❌ 你不在本次参战名单", show_alert=True)
+            return
+        used = await get_war_used_attacks(war_id, uid)
+        if used >= int(war["attacks_per_member"]):
+            await cb.answer("❌ 你的进攻次数已用完", show_alert=True)
+            return
+        enemy_clan = war["clan_b"] if war["clan_a"] == p["clan_id"] else war["clan_a"]
+        enemy_roster = await get_war_roster(war_id, enemy_clan)
+        if target_uid not in enemy_roster:
+            await cb.answer("❌ 非本场可攻击目标", show_alert=True)
+            return
+        defender = await get_player(target_uid)
+        if not defender:
+            await cb.answer("❌ 目标数据异常", show_alert=True)
+            return
+        if not any(v > 0 for v in p.get("troops", {}).values()):
+            await cb.answer("❌ 你当前没有部队", show_alert=True)
+            return
+        combat = calculate_attack(p, defender, selected_troops=p["troops"])
+        stars = int(combat["stars"])
+        destruction = round(_calc_war_destruction(combat), 2)
+        await incr_war_used_attacks(war_id, uid)
+        improved = await upsert_war_best_for_target(
+            war_id,
+            target_uid,
+            stars=stars,
+            destruction=destruction,
+            attacker_uid=uid,
+            ts=time.time(),
+        )
+        await append_war_attack_log(
+            war_id,
+            {
+                "attacker_uid": uid,
+                "attacker_name": p["name"],
+                "target_uid": target_uid,
+                "target_name": defender["name"],
+                "stars": stars,
+                "destruction": destruction,
+                "improved": improved,
+                "time": time.time(),
+            },
+        )
+        my_stars, my_dest = await calc_war_score(war_id, enemy_roster)
+        en_stars, en_dest = await calc_war_score(war_id, my_roster)
+        text = (
+            f"⚔️ <b>部落战进攻结果</b>\n\n"
+            f"🗡️ {safe_html(p['name'])} → 🛡️ {safe_html(defender['name'])}\n"
+            f"结果：{'⭐' * stars if stars else '💀 0星'} | 💥{destruction:.1f}%\n"
+            f"{'✅ 刷新目标最佳成绩' if improved else 'ℹ️ 未超过目标历史最佳'}\n\n"
+            f"📊 当前比分（我方在前）\n"
+            f"⭐{my_stars} / 💥{my_dest:.1f}%  vs  ⭐{en_stars} / 💥{en_dest:.1f}%"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚔️ 继续进攻", callback_data=f"vm:watk:{uid}")],
+            [InlineKeyboardButton(text="◀️ 返回部落战", callback_data=f"vm:war:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
+    elif action == "wlog":
+        if not p.get("clan_id"):
+            await cb.answer("❌ 你还没有加入部落", show_alert=True)
+            return
+        war_id = await get_active_war_id(p["clan_id"])
+        war = await get_war(war_id) if war_id else None
+        if not war:
+            await cb.answer("❌ 当前没有进行中的部落战", show_alert=True)
+            return
+        logs = await get_war_attack_logs(war_id, limit=30)
+        lines = ["📜 <b>部落战日志（最近30条）</b>\n"]
+        if not logs:
+            lines.append("暂无记录")
+        else:
+            for r in reversed(logs):
+                ts = datetime.datetime.fromtimestamp(float(r.get("time", 0)), tz=TZ_BJ).strftime("%m-%d %H:%M")
+                lines.append(
+                    f"<code>{ts}</code> {safe_html(r.get('attacker_name','?'))} → "
+                    f"{safe_html(r.get('target_name','?'))} | "
+                    f"{'⭐'*int(r.get('stars',0)) if int(r.get('stars',0)) else '0星'} "
+                    f"💥{float(r.get('destruction',0)):.1f}%"
+                )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ 返回部落战", callback_data=f"vm:war:{uid}")],
+        ])
+        try:
+            await cb.message.edit_text("\n".join(lines), reply_markup=kb)
+        except Exception:
+            pass
+        await cb.answer()
+
     elif action == "clan":
         if not p["clan_id"]:
             # 未加入部落 → 显示部落选项面板
@@ -3893,6 +4471,9 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         if p["clan_id"]:
             await cb.answer("❌ 你已在一个部落中", show_alert=True)
             return
+        if await get_active_war_id(clan_id):
+            await cb.answer("❌ 目标部落正在进行部落战，暂不可加入", show_alert=True)
+            return
         clan = await get_clan(clan_id)
         if not clan:
             await cb.answer("❌ 部落不存在", show_alert=True)
@@ -3952,6 +4533,9 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
     elif action == "cleave":
         if not p["clan_id"]:
             await cb.answer("❌ 你不在任何部落中", show_alert=True)
+            return
+        if await get_active_war_id(p["clan_id"]):
+            await cb.answer("❌ 部落战进行中，暂不可离开部落", show_alert=True)
             return
         clan = await get_clan(p["clan_id"])
         clan_name = clan["name"] if clan else "未知"

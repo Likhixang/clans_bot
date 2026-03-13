@@ -13,17 +13,22 @@ from config import (
     SUPER_ADMIN_ID, TZ_BJ, LOOT_PERCENT, ALLOWED_CHAT_ID,
     SHIELD_DECAY_THRESHOLD_BASE, SHIELD_DECAY_THRESHOLD_PER_TH, SHIELD_DECAY_NEWBIE_GRACE,
     SHIELD_DECAY_RATE_LOW, SHIELD_DECAY_RATE_MID, SHIELD_DECAY_RATE_HIGH,
+    CLAN_WAR_BATTLE_SECONDS, CLAN_WAR_MIN_MEMBERS,
 )
 from models import (
     get_all_player_uids, get_player, collect_resources,
     add_gold, add_elixir, set_field, add_battle_log, set_building_damage,
     get_effective_building_defense, iter_damageable_defense_buildings,
-    apply_building_damage_increments,
+    apply_building_damage_increments, get_clan,
 )
 from combat import (
     _pending_collectable, _calc_resource_loot, _estimate_last_collect_after_loot,
 )
-from utils import safe_html, fmt_num, send
+from utils import safe_html, fmt_num, send, pin_in_topic
+from war import (
+    list_active_war_ids, get_war, get_war_roster, set_war_phase,
+    calc_war_score, finish_war, clear_war_pin, set_war_pin,
+)
 
 logger = logging.getLogger(__name__)
 BOT_ATTACKER_NAMES = [
@@ -52,6 +57,7 @@ BACKUP_GLOB = "backup_*.db"
 BACKUP_KEEP = 3
 AUTO_COLLECT_TICK_SECONDS = 30
 SHIELD_DECAY_TICK_SECONDS = 60
+WAR_PROGRESS_TICK_SECONDS = 25
 
 
 def _points_key(uid: str) -> str:
@@ -764,3 +770,109 @@ async def random_bot_attack_task():
         except Exception as e:
             logger.error(f"机器人随机进攻任务异常: {e}")
         await asyncio.sleep(random.randint(40, 80))
+
+
+async def _unpin_war_announce(war: dict) -> None:
+    pin_id = int(war.get("pin_message_id", 0) or 0)
+    chat_id = int(war.get("chat_id", 0) or 0)
+    if not pin_id or not chat_id:
+        return
+    try:
+        await bot.unpin_chat_message(chat_id=chat_id, message_id=pin_id)
+    except Exception:
+        pass
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=pin_id)
+    except Exception:
+        pass
+    await clear_war_pin(war["id"])
+
+
+async def _pin_war_phase_announce(war: dict, phase: str, text: str) -> None:
+    chat_id = int(war.get("chat_id", 0) or 0)
+    if not chat_id:
+        return
+    msg = await send(chat_id, text)
+    if not msg:
+        return
+    try:
+        await pin_in_topic(chat_id, msg.message_id, disable_notification=False)
+        await set_war_pin(war["id"], msg.message_id, phase)
+    except Exception:
+        pass
+
+
+async def war_progress_task():
+    """部落战阶段推进：准备期->战斗期->结束，并处理阶段置顶提醒。"""
+    while True:
+        try:
+            now = time.time()
+            war_ids = await list_active_war_ids()
+            for war_id in war_ids:
+                war = await get_war(war_id)
+                if not war:
+                    continue
+                state = war.get("state", "")
+                if state == "prep" and now >= float(war.get("prep_until", 0)):
+                    roster_a = await get_war_roster(war_id, war["clan_a"])
+                    roster_b = await get_war_roster(war_id, war["clan_b"])
+                    if len(roster_a) < CLAN_WAR_MIN_MEMBERS or len(roster_b) < CLAN_WAR_MIN_MEMBERS:
+                        await _unpin_war_announce(war)
+                        ca = await get_clan(war["clan_a"])
+                        cb = await get_clan(war["clan_b"])
+                        summary = "报名人数不足，部落战流产"
+                        await finish_war(war, "", summary)
+                        await send(
+                            int(war.get("chat_id", 0) or 0),
+                            (
+                                f"⚠️ <b>部落战结束（未开战）</b>\n\n"
+                                f"🏯 {safe_html(ca['name']) if ca else 'A'} vs {safe_html(cb['name']) if cb else 'B'}\n"
+                                f"原因：{summary}"
+                            ),
+                        )
+                        continue
+                    battle_until = now + CLAN_WAR_BATTLE_SECONDS
+                    await set_war_phase(war_id, "battle", battle_until=battle_until)
+                    await _unpin_war_announce(war)
+                    ca = await get_clan(war["clan_a"])
+                    cb = await get_clan(war["clan_b"])
+                    await _pin_war_phase_announce(
+                        war,
+                        "battle",
+                        (
+                            f"🚨 <b>部落战进入战斗期！</b>\n\n"
+                            f"🏯 {safe_html(ca['name']) if ca else 'A'}  vs  {safe_html(cb['name']) if cb else 'B'}\n"
+                            f"⏳ 战斗期剩余：24小时\n"
+                            "请在“⚔️ 部落战”面板发起进攻。"
+                        ),
+                    )
+                elif state == "battle" and now >= float(war.get("battle_until", 0)):
+                    roster_a = await get_war_roster(war_id, war["clan_a"])
+                    roster_b = await get_war_roster(war_id, war["clan_b"])
+                    a_stars, a_dest = await calc_war_score(war_id, roster_b)
+                    b_stars, b_dest = await calc_war_score(war_id, roster_a)
+                    ca = await get_clan(war["clan_a"])
+                    cb = await get_clan(war["clan_b"])
+                    winner = ""
+                    result = "平局"
+                    if a_stars > b_stars or (a_stars == b_stars and a_dest > b_dest):
+                        winner = war["clan_a"]
+                        result = f"{safe_html(ca['name']) if ca else '我方'} 胜"
+                    elif b_stars > a_stars or (a_stars == b_stars and b_dest > a_dest):
+                        winner = war["clan_b"]
+                        result = f"{safe_html(cb['name']) if cb else '对方'} 胜"
+                    summary = f"{result}（⭐{a_stars}-{b_stars}，💥{a_dest:.1f}% - {b_dest:.1f}%）"
+                    await _unpin_war_announce(war)
+                    await finish_war(war, winner, summary)
+                    await send(
+                        int(war.get("chat_id", 0) or 0),
+                        (
+                            f"🏁 <b>部落战已结束</b>\n\n"
+                            f"🏯 {safe_html(ca['name']) if ca else 'A'}  ⭐{a_stars} / 💥{a_dest:.1f}%\n"
+                            f"🏯 {safe_html(cb['name']) if cb else 'B'}  ⭐{b_stars} / 💥{b_dest:.1f}%\n\n"
+                            f"结果：{summary}"
+                        ),
+                    )
+        except Exception as e:
+            logger.error(f"部落战推进任务异常: {e}")
+        await asyncio.sleep(WAR_PROGRESS_TICK_SECONDS)

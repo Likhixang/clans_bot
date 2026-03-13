@@ -9,7 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from core import bot, dp, redis, points_redis
 from handlers import router, _compensation_cleanup
 from models import sanitize_all_player_resources
-from tasks import hourly_backup_task, auto_collect_task, random_bot_attack_task, shield_decay_task
+from tasks import hourly_backup_task, auto_collect_task, random_bot_attack_task, shield_decay_task, war_progress_task
 from config import (
     RUN_MODE,
     WEBHOOK_BASE_URL,
@@ -53,6 +53,8 @@ COMMANDS = [
     BotCommand(command="clan_list", description="部落列表"),
     BotCommand(command="clan_join", description="加入部落"),
     BotCommand(command="clan_leave", description="离开部落"),
+    BotCommand(command="clan_war", description="部落战中心"),
+    BotCommand(command="clan_war_challenge", description="首领发起部落战"),
     BotCommand(command="clan_give", description="[超管] 回复加积分"),
     BotCommand(command="clan_take", description="[超管] 回复扣积分"),
     BotCommand(command="clan_maintain", description="[超管] 停机维护"),
@@ -105,6 +107,7 @@ async def main():
     asyncio.create_task(auto_collect_task())
     asyncio.create_task(random_bot_attack_task())
     asyncio.create_task(shield_decay_task())
+    asyncio.create_task(war_progress_task())
     await _recover_compensation_pins()
     await bot.set_my_commands(COMMANDS)
     await bot.set_my_commands(COMMANDS, scope=BotCommandScopeAllGroupChats())
