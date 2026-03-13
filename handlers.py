@@ -1837,30 +1837,62 @@ async def cmd_wiki_defense(msg: types.Message):
 async def cmd_wiki_buildings(msg: types.Message):
     if not _check(msg):
         return
-    support_lines = ["🏗️ <b>功能建筑补充</b>\n"]
-    for bid, info in BUILDINGS.items():
-        if not _is_base_building_id(bid):
-            continue
-        if "defense" in info:
-            continue
-        if "production" not in info and "capacity" not in info and bid not in {
-            "laboratory", "spell_factory", "workshop", "hero_altar", "clan_castle", "builder_hut", "barracks"
-        }:
-            continue
-        req = int(info.get("th_required", 1) or 1)
-        extra = "功能型"
+    lines = ["🏗️ <b>建筑图鉴</b>\n"]
+
+    def _effect_text(bid: str, info: dict) -> str:
+        if bid == "town_hall":
+            return "决定地块规模与其他建筑等级上限"
+        if bid == "builder_hut":
+            return "自动收集效率加成（每级+3%，上限+30%）"
+        if bid == "laboratory":
+            return "进攻总攻击力加成（每级+2%，上限+20%）"
+        if bid == "spell_factory":
+            return "积分护盾价格折扣（每级-2%，上限-18%）"
+        if bid == "workshop":
+            return "部队容量加成（每级+12）"
+        if bid == "hero_altar":
+            return "全局防御光环的一部分（最高约+20%）"
+        if bid == "clan_castle":
+            return "全局防御光环+部落战结算额外积分（每级+2，上限+20）"
         if "production" in info:
             vals = info["production"]
-            extra = f"产量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}/h"
-        elif "capacity" in info:
+            return f"资源产量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}/h"
+        if "capacity" in info:
             vals = info["capacity"]
-            extra = f"容量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
-        support_lines.append(
+            return f"容量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
+        if "defense" in info:
+            vals = info["defense"]
+            if bid == "wall":
+                role = "城防耐久"
+            elif bid == "air_defense" or bid.startswith("air_defense_"):
+                role = "反空军"
+            elif bid == "mortar" or bid.startswith("mortar_"):
+                role = "范围压制"
+            elif bid == "cannon" or bid.startswith("cannon_"):
+                role = "对地火力"
+            elif bid == "archer_tower" or bid.startswith("archer_tower_"):
+                role = "对空/对地均衡"
+            else:
+                role = "警戒压制"
+            return f"{role}，防御力 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
+        return safe_html(info.get("desc", "功能建筑"))
+
+    base_items: list[tuple[str, dict]] = []
+    for bid, info in BUILDINGS.items():
+        if _is_base_building_id(bid):
+            base_items.append((bid, info))
+    base_items.sort(key=lambda x: (int(x[1].get("th_required", 1) or 1), x[0]))
+
+    for bid, info in base_items:
+        req = int(info.get("th_required", 1) or 1)
+        max_lv = int(info.get("max_level", 0) or 0)
+        lines.append(
             f"{info['emoji']} <b>{safe_html(info['name'])}</b>（{bid}）\n"
-            f"  解锁: TH Lv.{req} | 说明: {safe_html(info.get('desc', '无'))}\n"
-            f"  核心属性: {extra}"
+            f"  解锁: TH Lv.{req} | 最高: Lv.{max_lv}\n"
+            f"  作用: {_effect_text(bid, info)}"
         )
-    await msg.reply("\n".join(support_lines))
+
+    await msg.reply("\n".join(lines))
 
 
 # ───────────────────── /train ─────────────────────
