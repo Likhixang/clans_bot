@@ -88,6 +88,7 @@ async def get_player(uid: str) -> dict | None:
         return None
     await _ensure_super_admin_privileges(uid, data)
     p = _parse(data)
+    p["is_super_admin"] = int(bool(SUPER_ADMIN_ID and uid == str(SUPER_ADMIN_ID)))
     if str(p["gold"]) != str(data.get("gold", "")) or str(p["elixir"]) != str(data.get("elixir", "")):
         await redis.hset(f"coc:{uid}", mapping={
             "gold": str(p["gold"]),
@@ -106,6 +107,7 @@ async def ensure_player(uid: str, name: str) -> dict:
             await redis.hset(f"coc:{uid}", "name", name)
             data["name"] = name
         p = _parse(data)
+        p["is_super_admin"] = int(bool(SUPER_ADMIN_ID and uid == str(SUPER_ADMIN_ID)))
         if str(p["gold"]) != str(data.get("gold", "")) or str(p["elixir"]) != str(data.get("elixir", "")):
             await redis.hset(f"coc:{uid}", mapping={
                 "gold": str(p["gold"]),
@@ -169,6 +171,7 @@ async def init_player(uid: str, name: str) -> dict:
     await redis.hset(f"coc:{uid}", mapping=data)
     await redis.sadd("coc:all_players", uid)
     p = _parse(data)
+    p["is_super_admin"] = int(bool(SUPER_ADMIN_ID and uid == str(SUPER_ADMIN_ID)))
     p["points"] = await get_points(uid)
     await redis.hset(f"coc:{uid}", "points", str(p["points"]))
     return p

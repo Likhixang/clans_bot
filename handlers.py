@@ -413,6 +413,8 @@ def _auto_collect_text(p: dict) -> str:
     until = float(p.get("auto_collect_until", 0))
     if until <= time.time():
         return "🤖 自动收集: 未开启"
+    if int(p.get("is_super_admin", 0)) == 1:
+        return "🤖 自动收集: 已开启"
     remain = int(until - time.time())
     h, m = divmod(remain // 60, 60)
     return f"🤖 自动收集: 已开启（剩余 {h}小时{m}分钟）"
