@@ -1750,46 +1750,79 @@ async def cmd_troops(msg: types.Message):
 async def cmd_wiki(msg: types.Message):
     if not _check(msg):
         return
-    lines = ["📚 <b>部落冲突图鉴</b>\n"]
-    lines.append("🏗️ <b>建筑图鉴</b>")
-    for bid, info in BUILDINGS.items():
-        max_lv = int(info.get("max_level", 0) or 0)
-        req = int(info.get("th_required", 1) or 1)
-        res = "💰金币" if info.get("resource") == "gold" else "💧圣水"
-        extra = ""
-        if "production" in info:
-            vals = info["production"]
-            extra = f" | 产量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}/h"
-        elif "capacity" in info:
-            vals = info["capacity"]
-            extra = f" | 容量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
-        elif "defense" in info:
-            vals = info["defense"]
-            extra = f" | 防御 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
-        lines.append(
-            f"{info['emoji']} <b>{safe_html(info['name'])}</b>（{bid}）\n"
-            f"  解锁TH Lv.{req} | 最高Lv.{max_lv} | {res}{extra}"
-        )
-
-    lines.append("\n🗡️ <b>兵种图鉴</b>")
+    troop_lines = ["🗡️ <b>兵种图鉴（功能向）</b>\n"]
     for tid, t in TROOPS.items():
         unlock = int(t.get("barracks_level", 1) or 1)
-        lines.append(
+        power = int(t.get("power", 0) or 0)
+        housing = max(1, int(t.get("housing", 1) or 1))
+        efficiency = round(power / housing, 1)
+        tags: list[str] = []
+        if t.get("bypass_wall"):
+            tags.append("空军")
+        else:
+            tags.append("陆军")
+        if float(t.get("wall_damage", 1.0) or 1.0) > 1.0:
+            tags.append("破墙")
+        if float(t.get("loot_bonus", 1.0) or 1.0) > 1.0:
+            tags.append("掠夺")
+        troop_lines.append(
             f"{t['emoji']} <b>{safe_html(t['name'])}</b>（{tid}）\n"
-            f"  兵营Lv.{unlock} | 费用💧{fmt_num(t['cost'])} | 战力⚔️{fmt_num(t['power'])} | 占用🏠{t['housing']}"
+            f"  定位: {' / '.join(tags)} | 解锁: 兵营Lv.{unlock}\n"
+            f"  战力: {fmt_num(power)} | 人口: {housing} | 单位人口战力: {efficiency}\n"
+            f"  说明: {safe_html(t.get('desc', '无'))}"
         )
 
-    text = "\n".join(lines)
-    if len(text) <= 3800:
-        await msg.reply(text)
-        return
-    split_at = text.find("\n🗡️ <b>兵种图鉴</b>")
-    if split_at == -1:
-        await msg.reply(text[:3800])
-        await msg.reply(text[3800:])
-        return
-    await msg.reply(text[:split_at])
-    await msg.reply(text[split_at + 1:])
+    def_lines = ["🛡️ <b>防御设施图鉴（功能向）</b>\n"]
+    for bid, info in BUILDINGS.items():
+        if "defense" not in info:
+            continue
+        vals = info["defense"]
+        req = int(info.get("th_required", 1) or 1)
+        max_lv = int(info.get("max_level", 0) or 0)
+        if bid == "wall":
+            role = "城防耐久"
+        elif bid == "air_defense" or bid.startswith("air_defense_"):
+            role = "反空军"
+        elif bid == "mortar" or bid.startswith("mortar_"):
+            role = "范围压制"
+        elif bid == "cannon" or bid.startswith("cannon_"):
+            role = "对地火力"
+        elif bid == "archer_tower" or bid.startswith("archer_tower_"):
+            role = "对空/对地均衡"
+        else:
+            role = "警戒压制"
+        def_lines.append(
+            f"{info['emoji']} <b>{safe_html(info['name'])}</b>（{bid}）\n"
+            f"  职能: {role} | 解锁: TH Lv.{req} | 最高: Lv.{max_lv}\n"
+            f"  防御力区间: {fmt_num(vals[0])} ~ {fmt_num(vals[-1])}\n"
+            f"  说明: {safe_html(info.get('desc', '无'))}"
+        )
+
+    support_lines = ["🏗️ <b>功能建筑补充</b>\n"]
+    for bid, info in BUILDINGS.items():
+        if "defense" in info:
+            continue
+        if "production" not in info and "capacity" not in info and bid not in {
+            "laboratory", "spell_factory", "workshop", "hero_altar", "clan_castle", "builder_hut", "barracks"
+        }:
+            continue
+        req = int(info.get("th_required", 1) or 1)
+        extra = "功能型"
+        if "production" in info:
+            vals = info["production"]
+            extra = f"产量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}/h"
+        elif "capacity" in info:
+            vals = info["capacity"]
+            extra = f"容量 {fmt_num(vals[0])}~{fmt_num(vals[-1])}"
+        support_lines.append(
+            f"{info['emoji']} <b>{safe_html(info['name'])}</b>（{bid}）\n"
+            f"  解锁: TH Lv.{req} | 说明: {safe_html(info.get('desc', '无'))}\n"
+            f"  核心属性: {extra}"
+        )
+
+    await msg.reply("\n".join(troop_lines))
+    await msg.reply("\n".join(def_lines))
+    await msg.reply("\n".join(support_lines))
 
 
 # ───────────────────── /train ─────────────────────
