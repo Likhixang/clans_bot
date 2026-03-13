@@ -84,6 +84,9 @@ KNOWN_CLAN_COMMANDS = {
     "clan_remove",
     "clan_upgrade",
     "clan_wiki",
+    "clan_wiki_troops",
+    "clan_wiki_defense",
+    "clan_wiki_buildings",
     "clan_troops",
     "clan_train",
     "clan_army",
@@ -1132,7 +1135,10 @@ async def cmd_help(msg: types.Message):
         "/clan_build - 建造新建筑（推荐用商店按钮）\n"
         "/clan_remove [建筑ID/建筑名] - 移除建筑并返还部分资源（大本营不可移除）\n"
         "/clan_upgrade - 升级建筑（推荐用商店按钮）\n\n"
-        "/clan_wiki - 建筑/兵种图鉴\n\n"
+        "/clan_wiki - 图鉴导航\n"
+        "/clan_wiki_troops - 兵种图鉴（功能战斗向）\n"
+        "/clan_wiki_defense - 防御设施图鉴（功能战斗向）\n"
+        "/clan_wiki_buildings - 功能建筑图鉴\n\n"
         "⚔️ <b>军事</b>\n"
         "/clan_troops - 可训练兵种列表\n"
         "/clan_train [兵种名] [数量] - 训练部队（支持中文兵种名，推荐用部队按钮）\n"
@@ -1750,6 +1756,26 @@ async def cmd_troops(msg: types.Message):
 async def cmd_wiki(msg: types.Message):
     if not _check(msg):
         return
+    await msg.reply(
+        "📚 <b>图鉴导航</b>\n\n"
+        "• /clan_wiki_troops - 兵种图鉴（功能战斗向）\n"
+        "• /clan_wiki_defense - 防御设施图鉴（功能战斗向）\n"
+        "• /clan_wiki_buildings - 功能建筑图鉴\n\n"
+        "说明：同系列建筑（如Ⅱ/Ⅲ）已自动去重，只展示基础条目。"
+    )
+
+
+def _is_base_building_id(bid: str) -> bool:
+    if "_" not in bid:
+        return True
+    suffix = bid.rsplit("_", 1)[1]
+    return not suffix.isdigit()
+
+
+@router.message(Command("clan_wiki_troops"))
+async def cmd_wiki_troops(msg: types.Message):
+    if not _check(msg):
+        return
     troop_lines = ["🗡️ <b>兵种图鉴（功能向）</b>\n"]
     for tid, t in TROOPS.items():
         unlock = int(t.get("barracks_level", 1) or 1)
@@ -1771,9 +1797,17 @@ async def cmd_wiki(msg: types.Message):
             f"  战力: {fmt_num(power)} | 人口: {housing} | 单位人口战力: {efficiency}\n"
             f"  说明: {safe_html(t.get('desc', '无'))}"
         )
+    await msg.reply("\n".join(troop_lines))
 
+
+@router.message(Command("clan_wiki_defense"))
+async def cmd_wiki_defense(msg: types.Message):
+    if not _check(msg):
+        return
     def_lines = ["🛡️ <b>防御设施图鉴（功能向）</b>\n"]
     for bid, info in BUILDINGS.items():
+        if not _is_base_building_id(bid):
+            continue
         if "defense" not in info:
             continue
         vals = info["defense"]
@@ -1797,9 +1831,17 @@ async def cmd_wiki(msg: types.Message):
             f"  防御力区间: {fmt_num(vals[0])} ~ {fmt_num(vals[-1])}\n"
             f"  说明: {safe_html(info.get('desc', '无'))}"
         )
+    await msg.reply("\n".join(def_lines))
 
+
+@router.message(Command("clan_wiki_buildings"))
+async def cmd_wiki_buildings(msg: types.Message):
+    if not _check(msg):
+        return
     support_lines = ["🏗️ <b>功能建筑补充</b>\n"]
     for bid, info in BUILDINGS.items():
+        if not _is_base_building_id(bid):
+            continue
         if "defense" in info:
             continue
         if "production" not in info and "capacity" not in info and bid not in {
@@ -1819,9 +1861,6 @@ async def cmd_wiki(msg: types.Message):
             f"  解锁: TH Lv.{req} | 说明: {safe_html(info.get('desc', '无'))}\n"
             f"  核心属性: {extra}"
         )
-
-    await msg.reply("\n".join(troop_lines))
-    await msg.reply("\n".join(def_lines))
     await msg.reply("\n".join(support_lines))
 
 

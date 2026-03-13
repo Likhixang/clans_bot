@@ -74,7 +74,10 @@ docker compose up -d --build
 | `/clan_build` | 建造新建筑（推荐用商店按钮） |
 | `/clan_remove <建筑ID/建筑名>` | 移除建筑（返还随放置时长线性衰减，超过 3 天返还为 0；大本营不可移除；支持中文建筑名） |
 | `/clan_upgrade` | 升级建筑（推荐用商店按钮） |
-| `/clan_wiki` | 建筑与兵种图鉴 |
+| `/clan_wiki` | 图鉴导航 |
+| `/clan_wiki_troops` | 兵种图鉴（功能战斗向） |
+| `/clan_wiki_defense` | 防御设施图鉴（功能战斗向） |
+| `/clan_wiki_buildings` | 功能建筑图鉴 |
 | `/clan_troops` | 兵种列表 |
 | `/clan_train <兵种名> <数量>` | 训练部队（支持中文兵种名，推荐用部队按钮） |
 | `/clan_army` | 查看当前部队 |
