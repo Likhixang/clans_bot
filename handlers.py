@@ -1136,8 +1136,8 @@ async def cmd_help(msg: types.Message):
         "/clan_remove [建筑ID/建筑名] - 移除建筑并返还部分资源（大本营不可移除）\n"
         "/clan_upgrade - 升级建筑（推荐用商店按钮）\n\n"
         "/clan_wiki - 图鉴导航\n"
-        "/clan_wiki_troops - 兵种图鉴（功能战斗向）\n"
-        "/clan_wiki_defense - 防御设施图鉴（功能战斗向）\n"
+        "/clan_wiki_troops - 兵种图鉴\n"
+        "/clan_wiki_defense - 防御设施图鉴\n"
         "/clan_wiki_buildings - 功能建筑图鉴\n\n"
         "⚔️ <b>军事</b>\n"
         "/clan_troops - 可训练兵种列表\n"
@@ -1758,10 +1758,9 @@ async def cmd_wiki(msg: types.Message):
         return
     await msg.reply(
         "📚 <b>图鉴导航</b>\n\n"
-        "• /clan_wiki_troops - 兵种图鉴（功能战斗向）\n"
-        "• /clan_wiki_defense - 防御设施图鉴（功能战斗向）\n"
-        "• /clan_wiki_buildings - 功能建筑图鉴\n\n"
-        "说明：同系列建筑（如Ⅱ/Ⅲ）已自动去重，只展示基础条目。"
+        "• /clan_wiki_troops - 兵种图鉴\n"
+        "• /clan_wiki_defense - 防御设施图鉴\n"
+        "• /clan_wiki_buildings - 功能建筑图鉴"
     )
 
 
