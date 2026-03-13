@@ -64,6 +64,10 @@ def _calc_pvp_damage_increments(defender: dict, stars: int) -> dict[str, float]:
             base = random.uniform(0.004, 0.016)
         elif bid == "cannon" or bid.startswith("cannon_"):
             base = random.uniform(0.007, 0.022)
+        elif bid == "air_defense" or bid.startswith("air_defense_"):
+            base = random.uniform(0.007, 0.023)
+        elif bid == "mortar" or bid.startswith("mortar_"):
+            base = random.uniform(0.007, 0.023)
         else:
             base = random.uniform(0.008, 0.024)
         increments[bid] = min(0.20, base * star_factor)
@@ -233,6 +237,8 @@ def calculate_attack(attacker: dict, defender: dict,
     base_attack = 0
     wall_attack = 0
     has_air = False
+    balloon_housing = 0
+    total_housing = 0
     loot_multiplier = 1.0
 
     for tid, cnt in troops.items():
@@ -241,6 +247,8 @@ def calculate_attack(attacker: dict, defender: dict,
         t = TROOPS[tid]
         power = t["power"] * cnt
         base_attack += power
+        unit_housing = t["housing"] * cnt
+        total_housing += unit_housing
 
         if t.get("wall_damage"):
             wall_attack += power * t["wall_damage"]
@@ -249,6 +257,8 @@ def calculate_attack(attacker: dict, defender: dict,
 
         if t.get("bypass_wall"):
             has_air = True
+        if tid == "balloon":
+            balloon_housing += unit_housing
         if t.get("loot_bonus"):
             goblin_ratio = (cnt * t["housing"]) / max(sum(
                 TROOPS[k]["housing"] * v for k, v in troops.items() if v > 0
@@ -259,14 +269,25 @@ def calculate_attack(attacker: dict, defender: dict,
     bld = defender["buildings"]
     cannon_def = 0
     tower_def = 0
+    air_def = 0
+    mortar_def = 0
     wall_def = 0
 
-    for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower"):
+    for bid in (
+        _building_series_ids("cannon")
+        + _building_series_ids("archer_tower")
+        + _building_series_ids("air_defense")
+        + _building_series_ids("mortar")
+    ):
         lv = bld.get(bid, 0)
         if lv > 0:
             val = get_effective_building_defense(defender, bid)
             if bid == "cannon" or bid.startswith("cannon_"):
                 cannon_def += val
+            elif bid == "air_defense" or bid.startswith("air_defense_"):
+                air_def += val
+            elif bid == "mortar" or bid.startswith("mortar_"):
+                mortar_def += val
             else:
                 tower_def += val
 
@@ -274,10 +295,18 @@ def calculate_attack(attacker: dict, defender: dict,
     if wall_lv > 0:
         wall_def = get_effective_building_defense(defender, "wall")
 
+    # 气球兵克制关系：
+    # - 更怕箭塔（箭塔等效防御上调）
+    # - 更克制加农炮（加农炮等效防御下调）
+    balloon_ratio = balloon_housing / max(total_housing, 1)
+    if balloon_ratio > 0:
+        tower_def *= (1.0 + 0.25 * balloon_ratio)
+        cannon_def *= (1.0 - 0.20 * balloon_ratio)
+
     # 空军无视城墙
     effective_wall = 0 if has_air else wall_def
     # 炸弹人对城墙额外伤害：用 wall_attack 对抗 wall_def
-    total_def = cannon_def + tower_def + effective_wall
+    total_def = cannon_def + tower_def + air_def + mortar_def + effective_wall
 
     # 随机因子
     atk_roll = random.uniform(0.85, 1.15)
@@ -288,7 +317,7 @@ def calculate_attack(attacker: dict, defender: dict,
     # 炸弹人效果：如果有炸弹人，城墙防御减半
     if any(TROOPS[t].get("wall_damage") for t in troops if troops[t] > 0):
         effective_wall *= 0.3
-        final_def = (cannon_def + tower_def) * def_roll + effective_wall * def_roll
+        final_def = (cannon_def + tower_def + air_def + mortar_def) * def_roll + effective_wall * def_roll
 
     # ── 星级判定 ──
     if final_def == 0:
@@ -455,6 +484,8 @@ def preview_attack(attacker: dict, defender: dict,
     base_attack = 0
     has_air = False
     has_wall_breaker = False
+    balloon_housing = 0
+    total_housing = 0
     loot_multiplier = 1.0
 
     for tid, cnt in troops.items():
@@ -462,10 +493,14 @@ def preview_attack(attacker: dict, defender: dict,
             continue
         t = TROOPS[tid]
         base_attack += t["power"] * cnt
+        unit_housing = t["housing"] * cnt
+        total_housing += unit_housing
         if t.get("bypass_wall"):
             has_air = True
         if t.get("wall_damage"):
             has_wall_breaker = True
+        if tid == "balloon":
+            balloon_housing += unit_housing
         if t.get("loot_bonus"):
             goblin_ratio = (cnt * t["housing"]) / max(sum(
                 TROOPS[k]["housing"] * v for k, v in troops.items() if v > 0
@@ -475,23 +510,39 @@ def preview_attack(attacker: dict, defender: dict,
     bld = defender["buildings"]
     cannon_def = 0
     tower_def = 0
+    air_def = 0
+    mortar_def = 0
     wall_def = 0
-    for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower"):
+    for bid in (
+        _building_series_ids("cannon")
+        + _building_series_ids("archer_tower")
+        + _building_series_ids("air_defense")
+        + _building_series_ids("mortar")
+    ):
         lv = bld.get(bid, 0)
         if lv > 0:
             val = get_effective_building_defense(defender, bid)
             if bid == "cannon" or bid.startswith("cannon_"):
                 cannon_def += val
+            elif bid == "air_defense" or bid.startswith("air_defense_"):
+                air_def += val
+            elif bid == "mortar" or bid.startswith("mortar_"):
+                mortar_def += val
             else:
                 tower_def += val
     wall_lv = bld.get("wall", 0)
     if wall_lv > 0:
         wall_def = get_effective_building_defense(defender, "wall")
 
+    balloon_ratio = balloon_housing / max(total_housing, 1)
+    if balloon_ratio > 0:
+        tower_def *= (1.0 + 0.25 * balloon_ratio)
+        cannon_def *= (1.0 - 0.20 * balloon_ratio)
+
     effective_wall = 0 if has_air else wall_def
     if has_wall_breaker:
         effective_wall *= 0.3
-    total_def = cannon_def + tower_def + effective_wall
+    total_def = cannon_def + tower_def + air_def + mortar_def + effective_wall
 
     if total_def == 0:
         ratio_min, ratio_max = 10.0, 10.0
@@ -566,7 +617,7 @@ def recommend_troops(attacker: dict, defender: dict) -> dict:
     plan: list[str] = []
 
     if has_wall and not has_tower:
-        for tid in ("dragon", "balloon", "wizard"):
+        for tid in ("electro_dragon", "dragon", "healer", "balloon", "wizard"):
             cnt = available.get(tid, 0)
             if cnt > 0:
                 plan.extend([tid] * cnt)
@@ -575,7 +626,7 @@ def recommend_troops(attacker: dict, defender: dict) -> dict:
     elif has_wall and has_tower:
         # 有墙有塔 -> 炸弹人破墙 + 地面重型
         plan.extend(["wall_breaker"] * min(available.get("wall_breaker", 0), 5))
-        for tid in ("giant", "wizard", "dragon"):
+        for tid in ("yeti", "pekka", "giant", "wizard", "dragon"):
             cnt = available.get(tid, 0)
             if cnt > 0:
                 plan.extend([tid] * cnt)
@@ -583,7 +634,7 @@ def recommend_troops(attacker: dict, defender: dict) -> dict:
             plan.extend(["goblin"] * min(available.get("goblin", 0), 5))
     else:
         # 无墙 -> 高攻优先
-        for tid in ("dragon", "wizard", "balloon", "giant"):
+        for tid in ("electro_dragon", "dragon", "yeti", "pekka", "wizard", "balloon", "giant"):
             cnt = available.get(tid, 0)
             if cnt > 0:
                 plan.extend([tid] * cnt)

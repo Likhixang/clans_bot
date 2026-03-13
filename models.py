@@ -11,7 +11,7 @@ from config import (
 )
 
 SHARED_POINTS_INIT = 20000.0
-DAMAGE_DEFENSE_BASES = ("cannon", "archer_tower", "wall")
+DAMAGE_DEFENSE_BASES = ("cannon", "archer_tower", "air_defense", "mortar", "wall")
 
 
 def _round_half_up(n: float) -> int:
@@ -340,7 +340,13 @@ def get_army_size(p: dict) -> int:
 def get_defense_power(p: dict) -> float:
     total = 0
     bld = p["buildings"]
-    for bid in _building_series_ids("cannon") + _building_series_ids("archer_tower") + ["wall"]:
+    for bid in (
+        _building_series_ids("cannon")
+        + _building_series_ids("archer_tower")
+        + _building_series_ids("air_defense")
+        + _building_series_ids("mortar")
+        + ["wall"]
+    ):
         lv = bld.get(bid, 0)
         if lv > 0:
             total += get_effective_building_defense(p, bid)

@@ -28,7 +28,7 @@ from models import (
     get_repair_cost_for_building, get_building_damage_ratio, set_building_damage,
     iter_damageable_defense_buildings, set_building_placed_at, get_building_remove_refund,
     create_clan, get_clan, join_clan, leave_clan, list_clans,
-    get_all_player_uids, incr_field, get_battle_log,
+    get_all_player_uids, incr_field, get_battle_log, add_battle_log,
     set_field,
 )
 from combat import (
@@ -188,7 +188,7 @@ router.callback_query.middleware(TelegramResilienceMiddleware())
 
 # ───────────────────── 村庄可视化 ─────────────────────
 
-# 基地地块解锁：TH 1-3 => 5x5，TH 4-6 => 6x6，TH 7+ => 7x7
+# 基地地块解锁：TH 1-3 => 5x5，TH 4-5 => 6x6，TH 6-7 => 7x7，TH 8+ => 8x8
 VILLAGE_LAYOUT_BY_SIZE = {
     5: {
         (1, 1): "wall",
@@ -246,11 +246,45 @@ VILLAGE_LAYOUT_BY_SIZE = {
         (5, 4): "archer_tower_4",
         (5, 5): "archer_tower_5",
     },
+    8: {
+        (1, 1): "wall",
+        (1, 2): "cannon",
+        (1, 3): "cannon_2",
+        (1, 4): "cannon_3",
+        (1, 5): "cannon_4",
+        (1, 6): "archer_tower",
+        (2, 1): "gold_mine",
+        (2, 2): "gold_mine_2",
+        (2, 3): "town_hall",
+        (2, 4): "elixir_collector",
+        (2, 5): "elixir_collector_2",
+        (2, 6): "barracks",
+        (3, 1): "gold_storage",
+        (3, 2): "gold_storage_2",
+        (3, 3): "elixir_storage",
+        (3, 4): "elixir_storage_2",
+        (3, 5): "gold_mine_3",
+        (3, 6): "elixir_collector_3",
+        (4, 1): "gold_storage_3",
+        (4, 2): "elixir_storage_3",
+        (4, 3): "archer_tower_2",
+        (4, 4): "archer_tower_3",
+        (4, 5): "archer_tower_4",
+        (4, 6): "archer_tower_5",
+        (5, 1): "cannon_5",
+        (5, 2): "air_defense",
+        (5, 3): "air_defense_2",
+        (5, 4): "air_defense_3",
+        (5, 5): "mortar",
+        (5, 6): "mortar_2",
+    },
 }
 
 
 def _village_size_by_th(th_lv: int) -> int:
-    if th_lv >= 7:
+    if th_lv >= 8:
+        return 8
+    if th_lv >= 6:
         return 7
     if th_lv >= 4:
         return 6
@@ -264,6 +298,8 @@ RESOURCE_BUILDING_GROUPS: dict[str, dict[str, str]] = {
     "elixir_storage": {"title": "🧪 圣水仓库", "emoji": "🧪"},
     "cannon": {"title": "💣 加农炮", "emoji": "💣"},
     "archer_tower": {"title": "🏹 箭塔", "emoji": "🏹"},
+    "air_defense": {"title": "🚀 防空火箭", "emoji": "🚀"},
+    "mortar": {"title": "🧨 迫击炮", "emoji": "🧨"},
 }
 
 
@@ -283,6 +319,22 @@ def _group_status(base_bid: str, bld: dict, th_lv: int) -> tuple[int, int]:
         if bld.get(bid, 0) > 0:
             built += 1
     return built, unlocked
+
+
+def _group_is_fully_maxed(base_bid: str, bld: dict, th_lv: int) -> bool:
+    unlocked = 0
+    for bid in _series_ids(base_bid):
+        info = BUILDINGS[bid]
+        if th_lv < info["th_required"]:
+            continue
+        unlocked += 1
+        lv = int(bld.get(bid, 0))
+        if lv <= 0:
+            return False
+        max_lv = min(th_lv + 1, info["max_level"])
+        if lv < max_lv:
+            return False
+    return unlocked > 0
 
 
 def _has_enough_resource(current: float, required: float) -> bool:
@@ -321,6 +373,9 @@ def _resolve_building_id(raw: str) -> str | None:
         "金矿": "gold_mine",
         "箭塔": "archer_tower",
         "炮": "cannon",
+        "防空": "air_defense",
+        "防空火箭": "air_defense",
+        "迫击炮": "mortar",
     }
     if token in alias:
         return alias[token]
@@ -505,6 +560,19 @@ async def _apply_observe_shield_decay(observer_uid: str, target_uid: str, target
             new_until = shield_until - decay_seconds
             await set_field(target_uid, "shield_until", new_until)
             target_p["shield_until"] = new_until
+            observer = await get_player(observer_uid)
+            observer_name = (observer or {}).get("name", observer_uid)
+            await add_battle_log(target_uid, {
+                "type": "observe_shield_decay",
+                "opponent": observer_name,
+                "observer_uid": str(observer_uid),
+                "decay_seconds": int(decay_seconds),
+                "stars": 0,
+                "gold": 0,
+                "elixir": 0,
+                "trophies": 0,
+                "time": now,
+            })
 
     await set_field(target_uid, "shield_observe_hits", hits)
     target_p["shield_observe_hits"] = hits
@@ -608,7 +676,14 @@ def _render_village(p: dict, name: str, clan_name: str = "") -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("🗺️ <b>基地俯瞰</b>")
     map_size = _village_size_by_th(th_lv)
-    next_expand = "已解锁最大地块" if map_size == 9 else ("Lv.4 解锁 7x7" if map_size == 5 else "Lv.7 解锁 9x9")
+    if map_size == 8:
+        next_expand = "已解锁最大地块"
+    elif map_size == 7:
+        next_expand = "Lv.8 解锁 8x8"
+    elif map_size == 6:
+        next_expand = "Lv.6 解锁 7x7"
+    else:
+        next_expand = "Lv.4 解锁 6x6"
     lines.append(f"📐 地块: {map_size}x{map_size}（下级扩建: {next_expand}）")
 
     # ── 城墙外观 ──
@@ -1238,7 +1313,8 @@ async def cmd_shop(msg: types.Message):
     for base_bid, meta in RESOURCE_BUILDING_GROUPS.items():
         built, unlocked = _group_status(base_bid, bld, th_lv)
         total = len(_series_ids(base_bid))
-        lines.append(f"{meta['title']}：已建 {built}/{total}，已解锁 {unlocked}/{total}")
+        maxed_tag = " ✅" if _group_is_fully_maxed(base_bid, bld, th_lv) else ""
+        lines.append(f"{meta['title']}：已建 {built}/{total}，已解锁 {unlocked}/{total}{maxed_tag}")
 
     lines.append("")
     lines.append("🏗️ <b>其他建筑</b>")
@@ -1881,6 +1957,14 @@ def _format_battle_log_page(logs: list[dict], page: int = 0) -> tuple[str, list[
         ts = r.get("time", 0)
         dt = datetime.datetime.fromtimestamp(ts, tz=TZ_BJ)
         hm = dt.strftime("%H:%M")
+        if r.get("type") == "observe_shield_decay":
+            decay_seconds = int(r.get("decay_seconds", 0))
+            h, m = divmod(decay_seconds // 60, 60)
+            lines.append(
+                f"<code>{hm}</code> 👁️ 侦察掉盾 ← {safe_html(r.get('opponent', '?'))} | "
+                f"🛡️-{h}小时{m}分钟"
+            )
+            continue
         if r["type"] == "attack":
             icon = "⚔️ 进攻 →"
         else:
@@ -2798,9 +2882,11 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         for base_bid, meta in RESOURCE_BUILDING_GROUPS.items():
             built, unlocked = _group_status(base_bid, bld, th_lv)
             total = len(_series_ids(base_bid))
-            lines.append(f"{meta['title']}：已建 {built}/{total}，已解锁 {unlocked}/{total}")
+            maxed = _group_is_fully_maxed(base_bid, bld, th_lv)
+            maxed_tag = " ✅" if maxed else ""
+            lines.append(f"{meta['title']}：已建 {built}/{total}，已解锁 {unlocked}/{total}{maxed_tag}")
             action_buttons.append(InlineKeyboardButton(
-                text=f"{meta['title']}（{built}/{total}）",
+                text=f"{meta['title']}（{built}/{total}）{'✅' if maxed else ''}",
                 callback_data=f"vm:grp:{base_bid}:{uid}",
             ))
         lines.append("")
@@ -4000,7 +4086,7 @@ def _render_troop_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
     if target_data:
         bld = target_data["buildings"]
         def_parts = []
-        for bid in ("cannon", "archer_tower", "wall"):
+        for bid in ("cannon", "archer_tower", "air_defense", "mortar", "wall"):
             lv = bld.get(bid, 0)
             if lv > 0:
                 def_parts.append(f"{BUILDINGS[bid]['emoji']}{BUILDINGS[bid]['name']}Lv.{lv}")

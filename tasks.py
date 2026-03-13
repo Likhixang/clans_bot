@@ -525,6 +525,10 @@ def _defense_group_by_bid(bid: str) -> str:
         return "wall"
     if bid == "cannon" or bid.startswith("cannon_"):
         return "cannon"
+    if bid == "air_defense" or bid.startswith("air_defense_"):
+        return "air_defense"
+    if bid == "mortar" or bid.startswith("mortar_"):
+        return "mortar"
     return "archer_tower"
 
 
