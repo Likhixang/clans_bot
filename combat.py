@@ -280,12 +280,20 @@ async def find_targets(attacker_uid: str, attacker: dict, count: int = 5) -> lis
             shielded_results.append((uid, p))
         else:
             unshielded_results.append((uid, p))
-        if len(unshielded_results) >= count:
-            break
-    if len(unshielded_results) >= count:
-        return unshielded_results[:count]
-    remaining = max(0, count - len(unshielded_results))
-    return unshielded_results + shielded_results[:remaining]
+
+    # 为“侦察带盾目标”固定预留名额，避免被可进攻目标完全挤掉。
+    reserve_shielded = 1 if count > 1 else 0
+    shield_take = min(reserve_shielded, len(shielded_results))
+    unshield_take = min(count - shield_take, len(unshielded_results))
+
+    picked = unshielded_results[:unshield_take] + shielded_results[:shield_take]
+    remaining = max(0, count - len(picked))
+    if remaining > 0 and len(unshielded_results) > unshield_take:
+        picked.extend(unshielded_results[unshield_take:unshield_take + remaining])
+        remaining = max(0, count - len(picked))
+    if remaining > 0 and len(shielded_results) > shield_take:
+        picked.extend(shielded_results[shield_take:shield_take + remaining])
+    return picked
 
 
 def calculate_attack(attacker: dict, defender: dict,
