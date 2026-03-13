@@ -14,12 +14,13 @@ from config import (
     SHIELD_DECAY_THRESHOLD_BASE, SHIELD_DECAY_THRESHOLD_PER_TH, SHIELD_DECAY_NEWBIE_GRACE,
     SHIELD_DECAY_RATE_LOW, SHIELD_DECAY_RATE_MID, SHIELD_DECAY_RATE_HIGH,
     CLAN_WAR_BATTLE_SECONDS, CLAN_WAR_MIN_MEMBERS,
+    CLAN_WAR_REWARD_WIN, CLAN_WAR_REWARD_LOSE, CLAN_WAR_REWARD_DRAW,
 )
 from models import (
     get_all_player_uids, get_player, collect_resources,
     add_gold, add_elixir, set_field, add_battle_log, set_building_damage,
     get_effective_building_defense, iter_damageable_defense_buildings,
-    apply_building_damage_increments, get_clan,
+    apply_building_damage_increments, get_clan, add_points,
 )
 from combat import (
     _pending_collectable, _calc_resource_loot, _estimate_last_collect_after_loot,
@@ -802,6 +803,33 @@ async def _pin_war_phase_announce(war: dict, phase: str, text: str) -> None:
         pass
 
 
+async def _reward_war_participants(
+    winner: str,
+    roster_a: list[str],
+    roster_b: list[str],
+    clan_a_id: str,
+    clan_b_id: str,
+) -> tuple[int, int, int, int]:
+    if winner:
+        reward_a = CLAN_WAR_REWARD_WIN if winner == clan_a_id else CLAN_WAR_REWARD_LOSE
+        reward_b = CLAN_WAR_REWARD_WIN if winner == clan_b_id else CLAN_WAR_REWARD_LOSE
+    else:
+        reward_a = CLAN_WAR_REWARD_DRAW
+        reward_b = CLAN_WAR_REWARD_DRAW
+
+    for uid in roster_a:
+        p = await get_player(uid)
+        if not p or p.get("clan_id") != clan_a_id:
+            continue
+        await add_points(uid, reward_a)
+    for uid in roster_b:
+        p = await get_player(uid)
+        if not p or p.get("clan_id") != clan_b_id:
+            continue
+        await add_points(uid, reward_b)
+    return reward_a, reward_b, len(roster_a), len(roster_b)
+
+
 async def war_progress_task():
     """部落战阶段推进：准备期->战斗期->结束，并处理阶段置顶提醒。"""
     while True:
@@ -862,6 +890,9 @@ async def war_progress_task():
                         winner = war["clan_b"]
                         result = f"{safe_html(cb['name']) if cb else '对方'} 胜"
                     summary = f"{result}（⭐{a_stars}-{b_stars}，💥{a_dest:.1f}% - {b_dest:.1f}%）"
+                    reward_a, reward_b, count_a, count_b = await _reward_war_participants(
+                        winner, roster_a, roster_b, war["clan_a"], war["clan_b"]
+                    )
                     await _unpin_war_announce(war)
                     await finish_war(war, winner, summary)
                     await send(
@@ -870,7 +901,10 @@ async def war_progress_task():
                             f"🏁 <b>部落战已结束</b>\n\n"
                             f"🏯 {safe_html(ca['name']) if ca else 'A'}  ⭐{a_stars} / 💥{a_dest:.1f}%\n"
                             f"🏯 {safe_html(cb['name']) if cb else 'B'}  ⭐{b_stars} / 💥{b_dest:.1f}%\n\n"
-                            f"结果：{summary}"
+                            f"结果：{summary}\n\n"
+                            f"🎁 积分奖励：\n"
+                            f"{safe_html(ca['name']) if ca else 'A'} 参战成员每人 +{reward_a}（共 {count_a} 人）\n"
+                            f"{safe_html(cb['name']) if cb else 'B'} 参战成员每人 +{reward_b}（共 {count_b} 人）"
                         ),
                     )
         except Exception as e:

@@ -6,12 +6,13 @@ import uuid
 from core import redis, points_redis
 from config import (
     STARTING_GOLD, STARTING_ELIXIR, STARTING_POINTS, STARTING_BUILDINGS,
-    BUILDINGS, TROOPS, CLAN_MAX_MEMBERS, NEWBIE_SHIELD,
+    BUILDINGS, TROOPS, CLAN_MAX_MEMBERS, NEWBIE_SHIELD, SUPER_ADMIN_ID,
     BUILDING_REMOVE_FULL_REFUND_WINDOW, BUILDING_REMOVE_REFUND_DECAY_PER_SEC,
 )
 
 SHARED_POINTS_INIT = 20000.0
 DAMAGE_DEFENSE_BASES = ("cannon", "archer_tower", "air_defense", "mortar", "wall")
+SUPER_ADMIN_AUTO_COLLECT_UNTIL = 4102444800.0  # 2100-01-01 UTC
 
 
 def _round_half_up(n: float) -> int:
@@ -57,12 +58,35 @@ def _sum_capacity_by_series(bld: dict, base_bid: str, default_main_lv: int = 1) 
     return total
 
 
+def _maxed_buildings() -> dict:
+    out = {}
+    for bid, info in BUILDINGS.items():
+        max_lv = int(info.get("max_level", 0) or 0)
+        if max_lv > 0:
+            out[bid] = max_lv
+    return out
+
+
+async def _ensure_super_admin_privileges(uid: str, data: dict | None = None) -> dict | None:
+    if not SUPER_ADMIN_ID or uid != str(SUPER_ADMIN_ID):
+        return data
+    payload = {
+        "buildings": json.dumps(_maxed_buildings(), ensure_ascii=False),
+        "auto_collect_until": str(SUPER_ADMIN_AUTO_COLLECT_UNTIL),
+    }
+    await redis.hset(f"coc:{uid}", mapping=payload)
+    if data is not None:
+        data.update(payload)
+    return data
+
+
 # ───────────────────── 玩家 ─────────────────────
 
 async def get_player(uid: str) -> dict | None:
     data = await redis.hgetall(f"coc:{uid}")
     if not data:
         return None
+    await _ensure_super_admin_privileges(uid, data)
     p = _parse(data)
     if str(p["gold"]) != str(data.get("gold", "")) or str(p["elixir"]) != str(data.get("elixir", "")):
         await redis.hset(f"coc:{uid}", mapping={
@@ -76,6 +100,7 @@ async def get_player(uid: str) -> dict | None:
 async def ensure_player(uid: str, name: str) -> dict:
     data = await redis.hgetall(f"coc:{uid}")
     if data:
+        await _ensure_super_admin_privileges(uid, data)
         # 更新名字
         if data.get("name") != name:
             await redis.hset(f"coc:{uid}", "name", name)
@@ -138,6 +163,9 @@ async def init_player(uid: str, name: str) -> dict:
         "building_placed_at": "{}",
         "created_at": str(now),
     }
+    if SUPER_ADMIN_ID and uid == str(SUPER_ADMIN_ID):
+        data["buildings"] = json.dumps(_maxed_buildings(), ensure_ascii=False)
+        data["auto_collect_until"] = str(SUPER_ADMIN_AUTO_COLLECT_UNTIL)
     await redis.hset(f"coc:{uid}", mapping=data)
     await redis.sadd("coc:all_players", uid)
     p = _parse(data)

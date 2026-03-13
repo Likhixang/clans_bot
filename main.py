@@ -55,6 +55,7 @@ COMMANDS = [
     BotCommand(command="clan_leave", description="离开部落"),
     BotCommand(command="clan_war", description="部落战中心"),
     BotCommand(command="clan_war_challenge", description="首领发起部落战"),
+    BotCommand(command="clan_war_history", description="最近部落战战报"),
     BotCommand(command="clan_give", description="[超管] 回复加积分"),
     BotCommand(command="clan_take", description="[超管] 回复扣积分"),
     BotCommand(command="clan_maintain", description="[超管] 停机维护"),

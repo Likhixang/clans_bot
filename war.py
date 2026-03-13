@@ -29,6 +29,14 @@ def _war_active_key(clan_id: str) -> str:
     return f"coc:war:active:{clan_id}"
 
 
+def _war_last_key(clan_id: str) -> str:
+    return f"coc:war:last:{clan_id}"
+
+
+def _war_history_key(clan_id: str) -> str:
+    return f"coc:war:history:{clan_id}"
+
+
 WAR_ALL_ACTIVE_KEY = "coc:war:all_active"
 
 
@@ -62,6 +70,14 @@ async def get_war(war_id: str) -> dict | None:
 
 async def get_active_war_id(clan_id: str) -> str:
     return await redis.get(_war_active_key(clan_id)) or ""
+
+
+async def get_latest_war_id(clan_id: str) -> str:
+    return await redis.get(_war_last_key(clan_id)) or ""
+
+
+async def get_clan_war_history_ids(clan_id: str, limit: int = 10) -> list[str]:
+    return list(await redis.lrange(_war_history_key(clan_id), 0, max(0, int(limit) - 1)))
 
 
 async def list_active_war_ids() -> list[str]:
@@ -145,6 +161,14 @@ async def incr_war_used_attacks(war_id: str, uid: str) -> int:
     return int(await redis.hincrby(_war_used_key(war_id), uid, 1))
 
 
+async def try_consume_war_attack(war_id: str, uid: str, limit: int) -> bool:
+    used = int(await redis.hincrby(_war_used_key(war_id), uid, 1))
+    if used <= int(limit):
+        return True
+    await redis.hincrby(_war_used_key(war_id), uid, -1)
+    return False
+
+
 async def append_war_attack_log(war_id: str, record: dict) -> None:
     await redis.lpush(_war_log_key(war_id), json.dumps(record, ensure_ascii=False))
     await redis.ltrim(_war_log_key(war_id), 0, 199)
@@ -223,5 +247,12 @@ async def finish_war(war: dict, winner_clan: str, summary: str) -> None:
     )
     await redis.delete(_war_active_key(war["clan_a"]))
     await redis.delete(_war_active_key(war["clan_b"]))
+    await redis.set(_war_last_key(war["clan_a"]), war_id)
+    await redis.set(_war_last_key(war["clan_b"]), war_id)
+    await redis.lrem(_war_history_key(war["clan_a"]), 0, war_id)
+    await redis.lrem(_war_history_key(war["clan_b"]), 0, war_id)
+    await redis.lpush(_war_history_key(war["clan_a"]), war_id)
+    await redis.lpush(_war_history_key(war["clan_b"]), war_id)
+    await redis.ltrim(_war_history_key(war["clan_a"]), 0, 49)
+    await redis.ltrim(_war_history_key(war["clan_b"]), 0, 49)
     await redis.srem(WAR_ALL_ACTIVE_KEY, war_id)
-
