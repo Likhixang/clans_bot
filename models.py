@@ -70,11 +70,29 @@ def _maxed_buildings() -> dict:
 async def _ensure_super_admin_privileges(uid: str, data: dict | None = None) -> dict | None:
     if not SUPER_ADMIN_ID or uid != str(SUPER_ADMIN_ID):
         return data
+    now = time.time()
+    shield_source = ""
+    shield_until = 0.0
+    if data is not None:
+        shield_source = str(data.get("shield_source", "") or "")
+        try:
+            shield_until = float(data.get("shield_until", 0) or 0)
+        except Exception:
+            shield_until = 0.0
+    purchased_shield_active = shield_source == "purchased" and shield_until > now
     payload = {
         "buildings": json.dumps(_maxed_buildings(), ensure_ascii=False),
         "auto_collect_until": str(SUPER_ADMIN_AUTO_COLLECT_UNTIL),
         "building_damage": "{}",
     }
+    if not purchased_shield_active:
+        payload.update({
+            "shield_until": "0",
+            "shield_source": "",
+            "shield_purchase_points": "0",
+            "shield_refund_eligible": "0",
+            "shield_observe_hits": "0",
+        })
     await redis.hset(f"coc:{uid}", mapping=payload)
     if data is not None:
         data.update(payload)
@@ -170,6 +188,11 @@ async def init_player(uid: str, name: str) -> dict:
         data["buildings"] = json.dumps(_maxed_buildings(), ensure_ascii=False)
         data["auto_collect_until"] = str(SUPER_ADMIN_AUTO_COLLECT_UNTIL)
         data["building_damage"] = "{}"
+        data["shield_until"] = "0"
+        data["shield_source"] = ""
+        data["shield_purchase_points"] = "0"
+        data["shield_refund_eligible"] = "0"
+        data["shield_observe_hits"] = "0"
     await redis.hset(f"coc:{uid}", mapping=data)
     await redis.sadd("coc:all_players", uid)
     p = _parse(data)

@@ -4,7 +4,7 @@ import time
 from core import redis
 from config import (
     TROOPS, BUILDINGS, SHIELD_DURATION, LOOT_PERCENT,
-    TROPHY_ATTACK, TROPHY_DEFENSE, LOOT_STORAGE_FACTOR, LOOT_COLLECTOR_FACTOR,
+    TROPHY_ATTACK, TROPHY_DEFENSE, LOOT_STORAGE_FACTOR, LOOT_COLLECTOR_FACTOR, SUPER_ADMIN_ID,
 )
 from models import (
     get_player, get_all_player_uids, get_defense_power, get_effective_building_defense,
@@ -491,7 +491,8 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         await set_troops(attacker_uid, {})
 
     # 护盾
-    shield_seconds = calc_defense_shield_seconds(defender, stars)
+    is_super_admin_defender = bool(SUPER_ADMIN_ID and defender_uid == str(SUPER_ADMIN_ID))
+    shield_seconds = 0 if is_super_admin_defender else calc_defense_shield_seconds(defender, stars)
     if shield_seconds > 0:
         shield = time.time() + shield_seconds
         await set_field(defender_uid, "shield_until", shield)
