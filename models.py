@@ -73,6 +73,7 @@ async def _ensure_super_admin_privileges(uid: str, data: dict | None = None) -> 
     payload = {
         "buildings": json.dumps(_maxed_buildings(), ensure_ascii=False),
         "auto_collect_until": str(SUPER_ADMIN_AUTO_COLLECT_UNTIL),
+        "building_damage": "{}",
     }
     await redis.hset(f"coc:{uid}", mapping=payload)
     if data is not None:
@@ -168,6 +169,7 @@ async def init_player(uid: str, name: str) -> dict:
     if SUPER_ADMIN_ID and uid == str(SUPER_ADMIN_ID):
         data["buildings"] = json.dumps(_maxed_buildings(), ensure_ascii=False)
         data["auto_collect_until"] = str(SUPER_ADMIN_AUTO_COLLECT_UNTIL)
+        data["building_damage"] = "{}"
     await redis.hset(f"coc:{uid}", mapping=data)
     await redis.sadd("coc:all_players", uid)
     p = _parse(data)
@@ -341,6 +343,9 @@ async def set_troops(uid: str, troops: dict):
 
 
 async def set_building_damage(uid: str, damage: dict):
+    if SUPER_ADMIN_ID and uid == str(SUPER_ADMIN_ID):
+        await redis.hset(f"coc:{uid}", "building_damage", "{}")
+        return
     await redis.hset(f"coc:{uid}", "building_damage", json.dumps(damage))
 
 
