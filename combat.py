@@ -63,9 +63,18 @@ def _attacker_capacity(attacker: dict) -> int:
 
 
 def _calc_loot_multiplier(troops: dict, attacker_capacity: int) -> float:
-    """掠夺倍率：按兵种占总兵营容量计算，避免少量哥布林异常放大。"""
+    """掠夺倍率：按出兵占比计算，少量哥布林不应放大掠夺。"""
     cap = max(1, int(attacker_capacity))
     bonus = 0.0
+    total_housing = 0.0
+    for tid, cnt in troops.items():
+        if cnt <= 0:
+            continue
+        t = TROOPS[tid]
+        total_housing += float(t["housing"] * cnt)
+    if total_housing <= 0:
+        return 1.0
+    occupancy = min(1.0, total_housing / cap)
     for tid, cnt in troops.items():
         if cnt <= 0:
             continue
@@ -73,9 +82,10 @@ def _calc_loot_multiplier(troops: dict, attacker_capacity: int) -> float:
         loot_bonus = float(t.get("loot_bonus", 1.0))
         if loot_bonus <= 1.0:
             continue
-        share = min(1.0, (t["housing"] * cnt) / cap)
+        share = min(1.0, (t["housing"] * cnt) / total_housing)
         bonus += (loot_bonus - 1.0) * share
     # 总加成封顶，避免全哥布林时掠夺比例过高
+    bonus *= occupancy
     return 1.0 + min(0.35, bonus)
 
 
@@ -500,7 +510,8 @@ async def execute_attack(attacker_uid: str, defender_uid: str,
         await set_field(defender_uid, "shield_purchase_points", 0)
         await set_field(defender_uid, "shield_refund_eligible", 0)
         await _rotate_shield_token(defender_uid, shield)
-        result["defender_shield_seconds"] = shield_seconds
+        result["defender_shield_until"] = shield
+    result["defender_shield_seconds"] = int(shield_seconds)
 
     # 防御设施损伤（被玩家攻击同样会损伤）
     damage_increments = _calc_pvp_damage_increments(defender, stars)

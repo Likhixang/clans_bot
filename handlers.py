@@ -1487,6 +1487,8 @@ async def cmd_shop(msg: types.Message):
     th_lv = bld.get("town_hall", 1)
 
     lines = ["🏪 <b>建筑商店</b>\n"]
+    lines.append(f"余额：💰{fmt_num(p['gold'])}  💧{fmt_num(p['elixir'])}")
+    lines.append("")
     grouped_ids = {
         bid
         for base_bid in RESOURCE_BUILDING_GROUPS
@@ -3367,6 +3369,8 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         bld = p["buildings"]
         th_lv = bld.get("town_hall", 1)
         lines = ["🏪 <b>建筑商店</b>\n"]
+        lines.append(f"余额：💰{fmt_num(p['gold'])}  💧{fmt_num(p['elixir'])}")
+        lines.append("")
         action_buttons: list[InlineKeyboardButton] = []
         grouped_ids = {
             bid
@@ -4276,7 +4280,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             f"🏆 奖杯: {'+' if combat['atk_trophy'] >= 0 else ''}{combat['atk_trophy']}\n\n"
             f"⚠️ 出战部队已消耗"
         )
-        sec = int(combat.get("defender_shield_seconds") or calc_defense_shield_seconds(defender, stars))
+        sec = int(combat.get("defender_shield_seconds") or 0)
         if sec > 0:
             h, m = divmod(sec // 60, 60)
             if stars <= 0:
@@ -4938,13 +4942,17 @@ def _render_troop_panel(uid: str, p: dict) -> tuple[str, InlineKeyboardMarkup]:
             t = TROOPS[tid]
             total_power += t["power"] * cnt
 
+    rendered_any = False
     for tid, have in all_troops.items():
         if have <= 0:
             continue
+        rendered_any = True
         t = TROOPS[tid]
         sel = selected.get(tid, 0)
         power = t["power"] * sel if sel > 0 else 0
         lines.append(f"{t['emoji']} {t['name']}  {sel}/{have}  ⚔️{fmt_num(power)}")
+    if not rendered_any:
+        lines.append("⚠️ 没有可用部队")
 
     # 战斗预览
     if total_power > 0 and target_data:
