@@ -3521,10 +3521,11 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         res_icon = "💰" if info["resource"] == "gold" else "💧"
 
         lines = [f"{info['emoji']} <b>{info['name']}</b>"]
+        lines.append(f"余额：💰{fmt_num(p['gold'])}  💧{fmt_num(p['elixir'])}  🪙{fmt_num(p['points'])}")
         if cur_lv == 0:
             cost = info["costs"][0]
             lines.append(f"状态: 未建造")
-            lines.append(f"建造费: {res_icon} {fmt_num(cost)}")
+            lines.append(f"建造费: {res_icon} {fmt_num(cost)}（当前: {res_icon} {fmt_num(p[info['resource']])}）")
             if "production" in info:
                 lines.append(f"Lv.1 产量: {fmt_num(info['production'][0])}/小时")
             elif "capacity" in info:
@@ -3570,7 +3571,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
                 lines.append(f"下一级: Lv.{cur_lv + 1} → {fmt_num(next_def)}")
             elif bid == "town_hall":
                 lines.append(f"下一级: Lv.{cur_lv + 1}")
-            lines.append(f"升级费: {res_icon} {fmt_num(cost)}")
+            lines.append(f"升级费: {res_icon} {fmt_num(cost)}（当前: {res_icon} {fmt_num(p[info['resource']])}）")
             btns = [[InlineKeyboardButton(
                 text=f"⬆️ 升级 ({res_icon}{fmt_num(cost)})",
                 callback_data=f"vm:up:{bid}:{uid}")]]
@@ -3585,6 +3586,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         if cur_lv > 0 and "defense" in info:
             repair_cost = get_repair_cost_for_building(p, bid)
             if repair_cost > 0:
+                lines.append(f"修复费: 💰 {fmt_num(repair_cost)}（当前: 💰 {fmt_num(p['gold'])}）")
                 btns.append([InlineKeyboardButton(
                     text=f"🛠️ 修复 (💰{fmt_num(repair_cost)})",
                     callback_data=f"vm:rpr:{bid}:{uid}",
