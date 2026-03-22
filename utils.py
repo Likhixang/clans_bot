@@ -1,0 +1,99 @@
+import asyncio
+import html
+import logging
+
+from aiogram import types
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from aiogram.methods import PinChatMessage
+
+from core import bot
+from config import ALLOWED_THREAD_ID
+
+
+def safe_html(text: str) -> str:
+    return html.escape(str(text))
+
+
+def mention(user_id, name):
+    return f"<a href='tg://user?id={user_id}'>{safe_html(name)}</a>"
+
+
+def thread_id():
+    return ALLOWED_THREAD_ID or None
+
+
+async def auto_delete(msgs: list, delay: int = 15):
+    if delay > 0:
+        await asyncio.sleep(delay)
+    for m in msgs:
+        try:
+            await m.delete()
+        except Exception:
+            pass
+
+
+def _is_ignorable_bad_request(err: TelegramBadRequest) -> bool:
+    msg = str(err).lower()
+    return (
+        "query is too old" in msg
+        or "query id is invalid" in msg
+        or "message is not modified" in msg
+    )
+
+
+async def safe_tg_call(coro_factory, *, retries: int = 1, retry_delay: float = 0.4, op: str = "tg_call"):
+    attempt = 0
+    while True:
+        try:
+            return await coro_factory()
+        except TelegramNetworkError as e:
+            if attempt >= retries:
+                logging.warning("[%s] Telegram network error: %s", op, e)
+                return None
+            attempt += 1
+            await asyncio.sleep(retry_delay)
+        except TelegramBadRequest as e:
+            if _is_ignorable_bad_request(e):
+                logging.info("[%s] Ignore Telegram bad request: %s", op, e)
+                return None
+            raise
+
+
+async def send(chat_id: int, text: str, reply_markup=None, delay_delete: int = 0):
+    msg = await safe_tg_call(
+        lambda: bot.send_message(
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+            message_thread_id=thread_id(),
+        ),
+        op="send_message",
+    )
+    if not msg:
+        return None
+    if delay_delete > 0:
+        asyncio.create_task(auto_delete([msg], delay_delete))
+    return msg
+
+
+def fmt_num(n: float) -> str:
+    val = round(float(n), 2)
+    if abs(val - int(val)) < 1e-9:
+        return f"{int(val):,}"
+    text = f"{val:,.2f}"
+    return text.rstrip("0").rstrip(".")
+
+
+async def pin_in_topic(chat_id: int, message_id: int, disable_notification: bool = False):
+    """pin_chat_message 的话题感知包装"""
+    kwargs = {"chat_id": chat_id, "message_id": message_id, "disable_notification": disable_notification}
+    if ALLOWED_THREAD_ID:
+        kwargs["message_thread_id"] = ALLOWED_THREAD_ID
+    await bot(PinChatMessage(**kwargs))
+
+
+async def delete_msg_by_id(chat_id: int, message_id: int):
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
