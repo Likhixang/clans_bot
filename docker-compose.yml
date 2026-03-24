@@ -20,7 +20,7 @@ services:
         max-file: "3"
 
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
     container_name: clans_redis
     restart: unless-stopped
     volumes:
