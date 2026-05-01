@@ -4423,6 +4423,9 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
         if not defender:
             await cb.answer("❌ 目标不存在", show_alert=True)
             return
+        if float(defender.get("shield_until", 0)) > time.time():
+            await cb.answer("❌ 对方已有护盾保护，本次发起失败", show_alert=True)
+            return
         # 验证选中部队是否仍然足够
         for tid, cnt in staging["troops"].items():
             if p["troops"].get(tid, 0) < cnt:

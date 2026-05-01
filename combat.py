@@ -254,8 +254,6 @@ async def find_target(attacker_uid: str, attacker: dict) -> tuple[str, dict] | N
         p = await get_player(uid)
         if not p:
             continue
-        if p["gold"] + p["elixir"] < 100:
-            continue
         # 同部落保护
         if attacker_clan and p.get("clan_id") == attacker_clan:
             continue
@@ -281,8 +279,6 @@ async def find_targets(attacker_uid: str, attacker: dict, count: int = 5) -> lis
     for uid in candidates[:50]:
         p = await get_player(uid)
         if not p:
-            continue
-        if p["gold"] + p["elixir"] < 100:
             continue
         if attacker_clan and p.get("clan_id") == attacker_clan:
             continue

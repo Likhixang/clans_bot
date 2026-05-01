@@ -471,6 +471,30 @@ async def auto_collect_task():
         await asyncio.sleep(AUTO_COLLECT_TICK_SECONDS)
 
 
+async def daily_collect_all_task():
+    """每天 23:59 自动为所有玩家结算资源（不受自动收集开关限制）。"""
+    while True:
+        now = datetime.datetime.now(TZ_BJ)
+        target = now.replace(hour=23, minute=59, second=0, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+        await asyncio.sleep((target - now).total_seconds())
+
+        try:
+            uids = await get_all_player_uids()
+            collected = 0
+            for uid in uids:
+                p = await get_player(uid)
+                if not p:
+                    continue
+                g, e = await collect_resources(uid, p)
+                if g > 0 or e > 0:
+                    collected += 1
+            logger.info(f"每日23:59自动收集完成，{collected}/{len(uids)}名玩家获得资源")
+        except Exception as e:
+            logger.error(f"每日自动收集任务异常: {e}")
+
+
 def _shield_decay_rate_per_hour(p: dict) -> float:
     """返回每小时额外衰减秒数（随机，且大本营越高越快）。"""
     th_lv = int(p.get("buildings", {}).get("town_hall", 1))
