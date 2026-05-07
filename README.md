@@ -1,199 +1,201 @@
+[English](README.md) | [中文](README.zh-CN.md)
+
 # Clans Bot 🏰
 
-Telegram 群组策略游戏机器人，灵感来自《部落冲突》。玩家可以建造村庄、训练军队、掠夺资源、加入部落。
+A Telegram group strategy game bot inspired by Clash of Clans. Players build villages, train armies, raid resources, and join clans.
 
-## 功能
+## Features
 
-- **村庄系统** — 5×5~8×8 可视化村庄网格，建造 / 升级 / 移除建筑（面板支持二次确认）
-- **资源系统** — 金矿 & 圣水收集器自动产出，仓库存储上限；每天 23:59 自动为所有玩家结算资源（无需开启自动收集）
-- **兑换系统** — 积分 1:1 购买金币/圣水；金币圣水互换损耗 2%；可在兑换中心购买自动收集（6 小时）与积分护盾（6 小时，动态定价；每天前 4 次购买可享主动破盾返还）
-- **积分互通** — 可对接 dice_bot 的 `user_balance:{uid}` 共享积分账户
-  - 首次在任意一边建号会初始化 20000 积分；另一边再建号不会重复发放
-- **兵种系统** — 12 种兵种，各具特色（空中单位、城墙克星、资源掠夺加成等）
-- **高本扩展** — 大本营最高 15 级，新增防空火箭/迫击炮防线与中后期兵种梯度
-- **PvP 战斗** — 回复目标发起进攻、自定义配兵、战前预览、智能推荐配兵、护盾打断返还规则
-- **野外袭击** — 随机动物袭击，按玩家强度加权命中，自动结算并发送普通通知
-- **部落系统** — 创建 / 加入部落，同部落保护，查看成员与排行
-- **部落战系统（MVP）** — 5v5、准备期/战斗期双阶段、报名参战、战斗日志、阶段置顶提醒自动切换
-- **战绩系统** — 按日分组查看，翻页浏览，出战部队记录
-- **交互面板** — 全按钮操作，无需记忆命令
-- **停机维护** — 一键进入维护模式，屏蔽所有操作，置顶维护公告
-- **停机补偿** — 全服仅发放金币+500、圣水+500（不含积分），置顶补偿公告（30 分钟后自动清理）
+- **Village System** — 5×5 to 8×8 visual village grid; build, upgrade, and remove buildings (with confirmation panel)
+- **Resource System** — Gold mines & elixir collectors auto-produce; storage caps; daily resource settlement at 23:59 for all players (no need to enable auto-collect)
+- **Exchange System** — Points buy gold/elixir at 1:1; gold-elixir swap with 2% loss; purchase auto-collect (6h) and point shields (6h, dynamic pricing; first 4 purchases per day eligible for shield-break refund)
+- **Shared Points** — Integrates with dice_bot's `user_balance:{uid}` for a shared point ledger
+  - First account creation on either side grants 20,000 points; creating on the other side does not double-issue
+- **Troop System** — 12 troop types with distinct traits (air units, wall breakers, loot bonuses)
+- **High TH Expansion** — Town Hall up to Lv.15, with Air Defense/Mortar defense lines and mid-to-late-game troop tiers
+- **PvP Combat** — Attack by replying to a target, custom troop composition, pre-battle preview, smart troop recommendation, shield-break refund rules
+- **Wild Raids** — Random animal raids weighted by player strength, auto-settled with normal notifications
+- **Clan System** — Create/join clans, same-clan protection, member and ranking views
+- **Clan War (MVP)** — 5v5, preparation/battle phases, sign-up, battle log, auto-switching pinned phase reminders
+- **Battle Records** — Daily grouped history with pagination and deployed troop records
+- **Interactive Panel** — Fully button-operated, no command memorization needed
+- **Maintenance Mode** — One-click maintenance that blocks all actions and pins a maintenance notice
+- **Maintenance Compensation** — Server-wide gold +500, elixir +500 (no points), pinned compensation notice (auto-cleared after 30 minutes)
 
-## 快速开始
+## Quick Start
 
-### 1. 配置环境变量
+### 1. Configure Environment Variables
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`：
+Edit `.env`:
 
-| 变量 | 说明 |
-|------|------|
-| `BOT_TOKEN` | Telegram Bot Token（从 @BotFather 获取） |
-| `SUPER_ADMIN_ID` | 超级管理员 Telegram UID |
-| `ADMIN_IDS` | 管理员 UID 列表，逗号分隔 |
-| `ALLOWED_CHAT_ID` | 限定群组 ID（0 = 不限制） |
-| `ALLOWED_THREAD_ID` | 限定话题 ID（0 = 不限制） |
-| `REDIS_PASSWORD` | Redis 密码 |
-| `POINTS_REDIS_HOST` | 共享积分 Redis 主机（填 `dice_redis` 可与 dice_bot 互通） |
-| `POINTS_REDIS_PORT` | 共享积分 Redis 端口（默认 6379） |
-| `POINTS_REDIS_DB` | 共享积分 Redis DB（默认 0） |
-| `POINTS_REDIS_PASSWORD` | 共享积分 Redis 密码 |
+| Variable | Description |
+|----------|-------------|
+| `BOT_TOKEN` | Telegram Bot Token (from @BotFather) |
+| `SUPER_ADMIN_ID` | Super-admin Telegram UID |
+| `ADMIN_IDS` | Admin UID list, comma-separated |
+| `ALLOWED_CHAT_ID` | Restricted group ID (0 = unrestricted) |
+| `ALLOWED_THREAD_ID` | Restricted topic ID (0 = unrestricted) |
+| `REDIS_PASSWORD` | Redis password |
+| `POINTS_REDIS_HOST` | Shared points Redis host (set to `dice_redis` for dice_bot integration) |
+| `POINTS_REDIS_PORT` | Shared points Redis port (default 6379) |
+| `POINTS_REDIS_DB` | Shared points Redis DB (default 0) |
+| `POINTS_REDIS_PASSWORD` | Shared points Redis password |
 
-### 2. Docker 部署
+### 2. Docker Deployment
 
 ```bash
 docker compose up -d --build
 ```
 
-容器会自动启动：
-- `clans_bot` — 机器人主进程
-- `clans_redis` — Redis 数据库
+Containers start automatically:
+- `clans_bot` — main bot process
+- `clans_redis` — Redis database
 
-### 3. 使用
+### 3. Usage
 
-在 Telegram 群组中发送 `/clan_start` 注册并开始游戏。
+Send `/clan_start` in a Telegram group to register and start playing.
 
-## 命令列表
+## Command List
 
-| 命令 | 说明 |
-|------|------|
-| `/clan_start` | 注册 / 进入游戏 |
-| `/clan_me` | 查看村庄面板（推荐） |
-| `/clan_help` | 帮助信息 |
-| `/clan_collect` | 收集资源 |
-| `/clan_shield` | 购买积分护盾（6小时，动态价格；每天前4次主动破盾可返还） |
-| `/clan_repair <建筑名/全部>` | 花金币修复受损防御建筑 |
-| `/clan_buy <金币/圣水> <积分数量>` | 积分 1:1 购买资源 |
-| `/clan_swap <金币/圣水> <数量>` | 金币/圣水互相兑换（损耗 2%，按四舍五入扣损耗） |
-| `/clan_sell <金币/圣水> <数量>` | 资源兑换积分（每 100 资源=1 积分，另收 2% 资源税） |
-| `/clan_shop` | 建筑商店 |
-| `/clan_build` | 建造新建筑（推荐用商店按钮） |
-| `/clan_remove <建筑ID/建筑名>` | 移除建筑（返还随放置时长线性衰减，超过 3 天返还为 0；大本营不可移除；支持中文建筑名） |
-| `/clan_upgrade` | 升级建筑（推荐用商店按钮） |
-| `/clan_wiki` | 图鉴导航 |
-| `/clan_wiki_troops` | 兵种图鉴（功能战斗向） |
-| `/clan_wiki_defense` | 防御设施图鉴（功能战斗向） |
-| `/clan_wiki_buildings` | 功能建筑图鉴 |
-| `/clan_troops` | 兵种列表 |
-| `/clan_train <兵种名> <数量>` | 训练部队（支持中文兵种名，推荐用部队按钮） |
-| `/clan_army` | 查看当前部队 |
-| `/clan_attack` | 攻击其他玩家（需回复目标玩家消息） |
-| `/clan_log` | 战绩记录（按日查看） |
-| `/clan_rank` | 奖杯排行榜 |
-| `/clan_create <名称>` | 创建部落 |
-| `/clan_join <部落名称>` | 加入部落 |
-| `/clan_leave` | 离开部落 |
-| `/clan_war` | 部落战中心（报名/进攻/日志） |
-| `/clan_war_challenge <部落名>` | [首领] 发起宣战 |
-| `/clan_war_history [数量]` | 最近部落战战报（默认10，最大30） |
-| `/clan_info` | 查看部落信息 |
-| `/clan_list` | 部落列表 |
-| `/clan_give <数量>` (回复消息) | [超管] 发放积分 |
-| `/clan_take <数量>` (回复消息) | [超管] 扣除积分 |
-| `/clan_maintain` | [超管] 停机维护（屏蔽所有操作，置顶公告） |
-| `/clan_compensate [更新说明]` | [超管] 停机补偿（全服仅补偿 金币+500、圣水+500；公告含“更新内容”） |
-| `/clan_backup_db` | [超管] 备份数据库 |
-| `/clan_restore_db` | [超管] 恢复数据库 |
+| Command | Description |
+|---------|-------------|
+| `/clan_start` | Register / enter game |
+| `/clan_me` | View village panel (recommended) |
+| `/clan_help` | Help info |
+| `/clan_collect` | Collect resources |
+| `/clan_shield` | Buy point shield (6h, dynamic price; first 4 shield-breaks per day refunded) |
+| `/clan_repair <name/all>` | Repair damaged defenses with gold |
+| `/clan_buy <gold/elixir> <points>` | Buy resources with points at 1:1 |
+| `/clan_swap <gold/elixir> <amount>` | Swap gold/elixir (2% loss, rounded) |
+| `/clan_sell <gold/elixir> <amount>` | Sell resources for points (100 resources = 1 point, 2% resource tax) |
+| `/clan_shop` | Building shop |
+| `/clan_build` | Build new structure (use shop buttons) |
+| `/clan_remove <ID/name>` | Remove building (refund decays linearly over 3 days to 0; Town Hall is irremovable; Chinese names supported) |
+| `/clan_upgrade` | Upgrade building (use shop buttons) |
+| `/clan_wiki` | Wiki navigation |
+| `/clan_wiki_troops` | Troop wiki (combat-oriented) |
+| `/clan_wiki_defense` | Defense wiki (combat-oriented) |
+| `/clan_wiki_buildings` | Utility building wiki |
+| `/clan_troops` | Troop list |
+| `/clan_train <name> <count>` | Train troops (Chinese names supported; use troop buttons) |
+| `/clan_army` | View current army |
+| `/clan_attack` | Attack another player (must reply to target's message) |
+| `/clan_log` | Battle records (daily view) |
+| `/clan_rank` | Trophy leaderboard |
+| `/clan_create <name>` | Create a clan |
+| `/clan_join <name>` | Join a clan |
+| `/clan_leave` | Leave current clan |
+| `/clan_war` | Clan war center (sign-up/attack/log) |
+| `/clan_war_challenge <clan>` | [Leader] Declare war |
+| `/clan_war_history [count]` | Recent war reports (default 10, max 30) |
+| `/clan_info` | View clan info |
+| `/clan_list` | Clan list |
+| `/clan_give <amount>` (reply) | [Super-admin] Grant points |
+| `/clan_take <amount>` (reply) | [Super-admin] Deduct points |
+| `/clan_maintain` | [Super-admin] Enable maintenance mode |
+| `/clan_compensate [notes]` | [Super-admin] Issue compensation (gold +500, elixir +500 server-wide) |
+| `/clan_backup_db` | [Super-admin] Backup database |
+| `/clan_restore_db` | [Super-admin] Restore database |
 
-> 大多数功能可通过 `/clan_me` 面板上的按钮直接操作。
+> Most features are accessible via buttons on the `/clan_me` panel.
 >
-> 维护模式提示仅在 `ALLOWED_CHAT_ID + ALLOWED_THREAD_ID` 指定的业务话题内生效，不会干扰同群其他话题。
+> Maintenance mode prompts only take effect in the business topic specified by `ALLOWED_CHAT_ID + ALLOWED_THREAD_ID`, without interfering with other topics in the same group.
 
-## 版本要点（TH15 扩展）
+## TH15 Expansion Highlights
 
-- 大本营上限：`Lv.15`
-- 地块扩展节奏：
-  - TH `1-3`：`5x5`
-  - TH `4-5`：`6x6`
-  - TH `6-7`：`7x7`
-  - TH `8+`：`8x8`
-- 新增防御建筑：
-  - `🚀 防空火箭`（TH5）
-  - `🚀 防空火箭Ⅱ`（TH8）
-  - `🚀 防空火箭Ⅲ`（TH11）
-  - `🧨 迫击炮`（TH5）
-  - `🧨 迫击炮Ⅱ`（TH9）
-- 新增兵种与兵营解锁：
-  - `🤖 皮卡超人`（兵营 Lv.7）
-  - `😇 天使`（兵营 Lv.8）
-  - `⚡ 雷电飞龙`（兵营 Lv.9）
-  - `🦣 雪怪`（兵营 Lv.10）
+- Town Hall cap: `Lv.15`
+- Grid expansion cadence:
+  - TH `1–3`: `5×5`
+  - TH `4–5`: `6×6`
+  - TH `6–7`: `7×7`
+  - TH `8+`: `8×8`
+- New defense buildings:
+  - `🚀 Air Defense` (TH5)
+  - `🚀 Air Defense II` (TH8)
+  - `🚀 Air Defense III` (TH11)
+  - `🧨 Mortar` (TH5)
+  - `🧨 Mortar II` (TH9)
+- New troops and barracks unlocks:
+  - `🤖 P.E.K.K.A` (Barracks Lv.7)
+  - `😇 Angel` (Barracks Lv.8)
+  - `⚡ Electro Dragon` (Barracks Lv.9)
+  - `🦣 Yeti` (Barracks Lv.10)
 
-## 战斗系统
+## Combat System
 
-1. **发起方式** — 必须回复一名真实玩家消息后使用 `/clan_attack`；未回复或回复机器人会被拦截（意图攻击机器人会被罚款）
-2. **选择部队** — 通过 ➕/➖/全部/清零 按钮自由配兵，或点击 🧠 智能推荐
-3. **战前预览** — 预估星级范围和掠夺量
-4. **确认出击** — 只消耗选中的部队，未选中的保留
-5. **同部落保护** — 不会攻击同一部落成员
-6. **空地克制体系** — 按空军/陆军出战人口占比动态结算：空军更怕对空防御但更克制对地防御；陆军更怕对地防御但更克制对空防御（预览与实战一致）
-7. **掠夺倍率修正** — 哥布林掠夺加成按“兵营总容量占比”计算，且总加成封顶，避免少量哥布林异常放大掠夺
+1. **Initiation** — Must reply to a real player's message before using `/clan_attack`; replying to a bot is intercepted (a fine is imposed for attempting to attack a bot)
+2. **Troop Selection** — Freely compose via ➕/➖/All/Clear buttons, or tap 🧠 Smart Recommend
+3. **Pre-Battle Preview** — Estimated star range and loot amount
+4. **Confirm Attack** — Only selected troops are consumed; unselected ones are kept
+5. **Same-Clan Protection** — Cannot attack clan members
+6. **Air/Ground Counter System** — Dynamically resolved by air/ground population ratio: air troops are more vulnerable to anti-air but stronger against ground defenses; ground troops are more vulnerable to ground defenses but stronger against anti-air (preview matches actual combat)
+7. **Loot Multiplier Correction** — Goblin loot bonus is calculated by barracks capacity proportion with a hard cap, preventing abnormal loot amplification from small goblin counts
 
-## 护盾与平衡
+## Shields and Balance
 
-1. **积分护盾** — 在兑换中心购买，时长 6 小时，价格按大本营/防御/可掠夺资源动态计算（50~500 积分）
-2. **护盾不可叠加** — 任意护盾生效期间（含被攻击获得护盾）不能再次购买积分护盾
-3. **手动打断返还** — 同一玩家每天前 4 次购买的积分护盾，主动打断并发起进攻时按剩余时间比例返还积分（整数四舍五入）；当日第 5 次起仍可购买，但主动打断不返还
-4. **防守护盾缩放** — 仅玩家 PvP 触发：被玩家攻击获得护盾时长按基地强度加权缩短；0星也会获得短护盾（约30~45分钟），1~3星按星级时长缩放且最低 1 小时
-5. **野外袭击判定** — 野外袭击可命中任何玩家；若目标有护盾则本次攻击失败、结算全 0，但会按目标大本营等级随机扣除护盾时长（同等级也随机，高本更容易多扣）；仍记录日志并发送普通通知；野外袭击不发放护盾
-6. **袭击调度** — 采用分散时间槽，5 小时窗口内最多随机袭击 5 名玩家，且同窗口内袭击时间错开，避免连发
-7. **资源溢出掉盾** — 护盾期间若“预计可掠夺资源（仓库+收集器）”超过动态阈值，会触发随机加速衰减；资源越多、目标大本营越高，随机衰减越快（含购买护盾与 PvP 护盾）
-8. **侦察消耗与掉盾** — 每次锁定观察固定消耗 100 金币；同一目标在同一轮护盾期间，每名玩家最多观察 3 次（下一轮护盾重置）；目标被观察累计每 3 次，会按目标大本营等级随机扣一段护盾时长（同等级随机，高本更容易多扣，不一次性清空）
-9. **破盾直达回复目标** — 你有护盾时若通过“放弃护盾并攻击”发起，将直接对回复目标进入流程：目标有护盾则立即失败，没护盾则进入侦察/选兵
-10. **机器人攻击惩罚** — 回复机器人消息发起攻击会直接处罚 1000 金币（不足则扣至 0）
-11. **防御损伤与维修** — 被玩家或野外袭击后，防御建筑会累积损伤并按比例降低防御力（可降至0）；可在商店建筑详情页或 `/clan_repair` 花金币修复
-12. **建筑移除机制** — 可在商店建筑详情页或 `/clan_remove` 移除非大本营建筑；返还按建造原价随放置时间线性衰减，超过 3 天返还为 0；按钮操作含二次确认
+1. **Point Shield** — Purchased at the exchange center, 6h duration, dynamically priced by TH/defense/lootable resources (50–500 points)
+2. **No Shield Stacking** — Cannot purchase another point shield while any shield is active (including shields gained from being attacked)
+3. **Manual Break Refund** — For the first 4 point shields purchased per player per day, voluntarily breaking the shield to attack refunds points proportionally by remaining time (rounded to integer); from the 5th purchase onward, breaks are not refunded
+4. **Defense Shield Scaling** — Player PvP only: shield duration gained from being attacked is shortened by base strength weighting; 0 stars still grants a short shield (~30–45 min); 1–3 stars scale by star count with a minimum of 1 hour
+5. **Wild Raid Resolution** — Wild raids can hit any player; if the target has a shield, the attack fails with all-zero settlement, but shield duration is randomly reduced based on target TH level (random even at same level, higher TH more likely to lose more); the event is still logged with a normal notification; wild raids do not grant shields
+6. **Raid Scheduling** — Uses distributed time slots; at most 5 players are raided within a 5-hour window, with staggered raid times to avoid bursts
+7. **Resource Overflow Shield Decay** — During shield, if "estimated lootable resources (storage + collectors)" exceeds a dynamic threshold, random accelerated decay triggers; more resources and higher target TH lead to faster random decay (applies to both purchased and PvP shields)
+8. **Recon Cost and Shield Decay** — Each observation lock costs 100 gold; each player can observe the same target at most 3 times per shield cycle (resets next cycle); every 3 cumulative observations on a target randomly reduces shield duration by target TH level (random, higher TH more vulnerable, never clears shield entirely)
+9. **Break-Shield Direct Reply** — If you have a shield and initiate via "drop shield and attack," you proceed directly against the replied target: target has a shield → immediate failure; no shield → recon/troop selection
+10. **Bot Attack Penalty** — Replying to a bot's message to attack incurs a fine of 1,000 gold (or reduces to 0 if insufficient)
+11. **Defense Damage and Repair** — After being attacked by a player or wild raid, defense buildings accumulate damage and lose defense proportionally (can drop to 0); repair with gold via shop building detail page or `/clan_repair`
+12. **Building Removal** — Remove non-Town-Hall buildings via shop detail page or `/clan_remove`; refund decays linearly from original build cost over 3 days, reaching 0; button operation includes confirmation
 
-## 部落战（MVP）
+## Clan War (MVP)
 
-1. **规模与阶段** — 固定 `5v5`，先准备期（报名）再战斗期（进攻）
-2. **报名规则** — 准备期可通过面板按钮报名/取消，双方都需达到最低人数（默认 3 人）才会开战
-3. **进攻规则** — 战斗期每人最多 2 次进攻；仅计部落战星级/摧毁率，不影响常规掠夺、奖杯、护盾
-4. **计分规则** — 每个防守目标只保留“最佳成绩”（先比星级，再比摧毁率）
-5. **提醒机制** — 准备期与战斗期都会发送醒目公告并置顶；阶段切换或结束会自动取消旧置顶
-6. **成员变更限制** — 部落战进行中，禁止加入/退出对应部落，防止名单绕过
-7. **结算奖励** — 战斗结束按参战名单发积分：胜方 +120/人，负方 +60/人，平局双方 +90/人
+1. **Scale and Phases** — Fixed `5v5`, preparation phase (sign-up) then battle phase (attacks)
+2. **Sign-Up Rules** — Sign up or cancel via panel buttons during preparation; both sides must reach minimum headcount (default 3) for war to start
+3. **Attack Rules** — Max 2 attacks per person during battle phase; only clan war stars/destruction % count, no impact on regular loot, trophies, or shields
+4. **Scoring** — Only the best result per defense target is kept (star count first, then destruction %)
+5. **Reminders** — Prominent announcements pinned during preparation and battle phases; old pins auto-removed on phase transitions or war end
+6. **Membership Lock** — During an active clan war, joining or leaving the corresponding clan is forbidden to prevent roster bypass
+7. **Rewards** — Points awarded by participation roster at war end: winners +120/person, losers +60/person, draw +90/person each side
 
-### 新增建筑效果
+### New Building Effects
 
-- `工人小屋`：提升自动收集效率（每级 +3%，上限 +30%）
-- `实验室`：提升部队总攻击力（每级 +2%，上限 +20%）
-- `法术工厂`：降低积分护盾价格（每级 -2%，上限 -18%）
-- `攻城工坊`：提升部队容量（每级 +12）
-- `英雄祭坛` + `部落城堡`：提供全局防御光环（合计上限约 +35%）
-- `部落城堡`：部落战结算额外积分（每级 +2，上限 +20）
+- `Builder's Hut`: boosts auto-collect efficiency (+3%/level, cap +30%)
+- `Laboratory`: boosts total troop attack (+2%/level, cap +20%)
+- `Spell Factory`: reduces point shield price (−2%/level, cap −18%)
+- `Siege Workshop`: increases troop capacity (+12/level)
+- `Hero Altar` + `Clan Castle`: provides global defense aura (combined cap ~+35%)
+- `Clan Castle`: bonus points on clan war settlement (+2/level, cap +20)
 
-## 超管特权
+## Super-Admin Privileges
 
-- `SUPER_ADMIN_ID` 对应账号为常驻特权：
-- 登录/加载时自动校准为“全建筑解锁 + 全部满级”
-- 自动收集永久开启（长期有效时间戳）
-- 基地建筑伤害永久清零（无需维修，始终最佳状态）
-- 默认永久无护盾；仅主动购买积分护盾时才生效（被攻击/系统流程不自动给盾）
+The account tied to `SUPER_ADMIN_ID` has permanent privileges:
+- Automatically calibrated to "all buildings unlocked + fully maxed" on login/load
+- Auto-collect permanently enabled (long-lived timestamp)
+- Base building damage permanently zero (no repairs needed, always optimal)
+- Default permanent no-shield; shields only take effect when actively purchased (no auto-shield from being attacked or system flows)
 
-## 项目结构
+## Project Structure
 
 ```
-├── main.py          # 入口 & 命令注册
-├── core.py          # Bot / Dispatcher / Redis 初始化
-├── config.py        # 常量：建筑、兵种、PvP 规则
-├── models.py        # Redis 数据层
-├── handlers.py      # 命令 & 回调处理
-├── combat.py        # PvP 战斗逻辑（配兵推荐、战前预览）
-├── tasks.py         # 定时备份 & 恢复 + 自动收集 + 每日结算 + 野外袭击
-├── utils.py         # 工具函数
+├── main.py          # Entry point & command registration
+├── core.py          # Bot / Dispatcher / Redis initialization
+├── config.py        # Constants: buildings, troops, PvP rules
+├── models.py        # Redis data layer
+├── handlers.py      # Command & callback handlers
+├── combat.py        # PvP combat logic (troop recommendation, pre-battle preview)
+├── tasks.py         # Scheduled backup & restore + auto-collect + daily settlement + wild raids
+├── utils.py         # Utility functions
 ├── Dockerfile
 ├── docker-compose.yml
 └── .env.example
 ```
 
-## 技术栈
+## Tech Stack
 
 - **Python 3.12** + **aiogram 3**
-- **Redis 7** — 数据持久化
-- **SQLite** — 定时备份
-- **Docker Compose** — 一键部署
+- **Redis 7** — data persistence
+- **SQLite** — scheduled backups
+- **Docker Compose** — one-click deployment
