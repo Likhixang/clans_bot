@@ -2454,9 +2454,9 @@ def _format_battle_log_page(logs: list[dict], page: int = 0) -> tuple[str, list[
 
 
 def _extract_last_attack_troops(logs: list[dict]) -> dict[str, int]:
-    """提取最近一次进攻记录中的出战兵种。"""
+    """提取最近一次进攻或群攻记录中的出战兵种。"""
     for r in logs:
-        if r.get("type") != "attack":
+        if r.get("type") not in ("attack", "group_attack"):
             continue
         used = r.get("troops_used")
         if not isinstance(used, dict):
@@ -4633,6 +4633,7 @@ async def _cb_village_panel_impl(cb: types.CallbackQuery):
             "gold": total_gold,
             "elixir": total_elixir,
             "multiplier": multiplier,
+            "troops_used": {tid: cnt for tid, cnt in troops.items() if cnt > 0},
         })
         if not is_super:
             await redis.setex(cd_key, 86400, "1")
